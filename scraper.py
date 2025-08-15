@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import cloudscraper # <<<<<<<<<<<<< 引入終極武器
+import cloudscraper
 
 # 引入 Selenium 相關函式庫
 from selenium import webdriver
@@ -19,10 +19,21 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
-SCRAPER_VERSION = "v8.0" # <<<<<<<<<<<<< 版本號更新
+SCRAPER_VERSION = "v8.1" # <<<<<<<<<<<<< 版本號更新
 DATABASE_URL = os.environ.get('DATABASE_URL')
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+]
+BASE_HEADERS = {'User-Agent': random.choice(USER_AGENTS),'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8','Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.6'}
 
 # --- 函式定義區 ---
+def create_session():
+    """建立一個帶有標頭的 requests Session"""
+    session = requests.Session()
+    session.headers.update(BASE_HEADERS)
+    return session
+
 def setup_database(engine):
     with engine.connect() as conn:
         conn.execute(text("""CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, title VARCHAR(255), url VARCHAR(255) UNIQUE, start_time VARCHAR(100), platform VARCHAR(50), image VARCHAR(255));"""))
@@ -66,7 +77,7 @@ def get_dynamic_page_source(url):
         if driver: driver.quit()
         return None
 
-# --- 各平台爬蟲函式 (V8) ---
+# --- 各平台爬蟲函式 (V8.1) ---
 def fetch_kktix_events(scraper):
     print("--- 開始從 KKTIX 抓取活動 ---")
     try:
@@ -89,11 +100,12 @@ def fetch_tixcraft_events(scraper):
         html_content = response.text
         print(f"  成功下載 拓元 頁面，長度: {len(html_content)} bytes")
         soup = BeautifulSoup(html_content, 'html.parser')
-        event_links = soup.select('a[href*="/activity/detail/"]') # 100% 複製成功經驗
+        event_links = soup.select('a[href*="/activity/detail/"]')
         events, seen_urls = [], set()
         for link in event_links:
             href = link.get('href')
-            if full_url := urljoin("https://tixcraft.com/", href) not in seen_urls:
+            full_url = urljoin("https://tixcraft.com/", href)
+            if href and full_url not in seen_urls:
                 title = link.find('h4', class_='event-name')
                 if title:
                     events.append({'title': title.text.strip(),'url': full_url,'start_time': '詳見內文','platform': '拓元','image': ''})
@@ -102,7 +114,7 @@ def fetch_tixcraft_events(scraper):
         return events
     except Exception as e:
         print(f"錯誤：抓取 拓元 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
-
+        
 def generic_category_fetcher(session, platform_name, category_map, base_url, selector):
     all_events, seen_urls = [], set()
     for category_name, category_url in category_map.items():
@@ -120,7 +132,7 @@ def generic_category_fetcher(session, platform_name, category_map, base_url, sel
                 full_url = urljoin(base_url, href)
                 if full_url in seen_urls: continue
                 title = link.text.strip()
-                if title and len(title) > 3:
+                if title and len(title) > 3 and "more" not in title.lower():
                     all_events.append({'title': title,'url': full_url,'start_time': '詳見內文','platform': platform_name,'image': ''})
                     seen_urls.add(full_url)
         except Exception as e:
@@ -178,7 +190,7 @@ def fetch_opentix_events(session):
             href = link.get('href')
             if not href or href in seen_urls or not href.startswith('/event/'): continue
             title = link.text.strip()
-            if len(title) > 3: # 篩掉一些空標題或無意義的連結
+            if len(title) > 3:
                 full_url = urljoin(url, href)
                 events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'OPENTIX', 'image': ''})
                 seen_urls.add(href)
@@ -195,20 +207,23 @@ if __name__ == "__main__":
     engine = create_engine(db_url_for_sqlalchemy)
     setup_database(engine)
     
-    # 建立兩種 session
     requests_session = create_session()
     cloudscraper_instance = cloudscraper.create_scraper()
     
     all_events = []
     
-    # 根據網站的防禦等級，使用不同的武器
-    all_events.extend(fetch_opentix_events(requests_session))
-    all_events.extend(fetch_kham_events(requests_session))
-    all_events.extend(fetch_udn_events(requests_session))
-    all_events.extend(fetch_ibon_events(requests_session))
-    all_events.extend(fetch_tixcraft_events(cloudscraper_instance))
-    all_events.extend(fetch_kktix_events(cloudscraper_instance))
+    scraper_tasks = [
+        (fetch_opentix_events, requests_session),
+        (fetch_kham_events, requests_session),
+        (fetch_udn_events, requests_session),
+        (fetch_ibon_events, requests_session),
+        (fetch_tixcraft_events, cloudscraper_instance),
+        (fetch_kktix_events, cloudscraper_instance)
+    ]
     
+    for task_func, session_instance in scraper_tasks:
+        all_events.extend(task_func(session_instance))
+
     final_events, processed_urls = [], set()
     for event in all_events:
         if event.get('url') and event['url'] not in processed_urls:
