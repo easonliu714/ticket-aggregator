@@ -26,9 +26,11 @@ def load_events_from_db():
 def home():
     events = load_events_from_db()
 
+    # 動態計算每個平台的活動數量
     platform_status = {
         "KKTIX": len([e for e in events if e['platform'] == 'KKTIX']),
-        "拓元": 0, "寬宏": 0, "iBon": 1, "UDN": 0, "OPENTIX": 1255
+        "拓元": len([e for e in events if e['platform'] == '拓元']), # <--- 新增
+        "寬宏": 0, "iBon": 0, "UDN": 0, "OPENTIX": 0
     }
     
     now = datetime.now().strftime("%Y/%m/%d")
