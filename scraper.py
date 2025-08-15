@@ -1,16 +1,30 @@
 # scraper.py
-import requests
-import json
 import os
+import requests
 from datetime import datetime
+from sqlalchemy import create_engine, text
 
-# Render 的 Persistent Disk 會掛載在 /data/ 目錄下
-# 我們將資料檔案存在這個目錄中
-DATA_DIR = '/data'
-DATA_FILE = os.path.join(DATA_DIR, 'events.json')
+# Render 會自動將資料庫連線 URL 注入到環境變數中
+DATABASE_URL = os.environ.get('DATABASE_URL')
 KKTIX_API_URL = "https://kktix.com/g/events.json?order=updated_at_desc&page=1"
 
+def setup_database(engine):
+    """建立資料表 (如果不存在的話)"""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS events (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(255),
+                url VARCHAR(255) UNIQUE,
+                start_time VARCHAR(50),
+                platform VARCHAR(50),
+                image VARCHAR(255)
+            );
+        """))
+        conn.commit()
+
 def fetch_kktix_events():
+    # ... (這個函式的內容完全不變，請從舊版程式碼複製過來) ...
     """從 KKTIX API 獲取活動資料"""
     events_data = []
     print("開始從 KKTIX 抓取活動...")
@@ -38,36 +52,45 @@ def fetch_kktix_events():
             return events_data
         else:
             print(f"錯誤：KKTIX API 回應狀態碼 {response.status_code}")
-            return None
+            return []
             
     except requests.RequestException as e:
         print(f"錯誤：請求 KKTIX API 時發生網路錯誤: {e}")
-        return None
+        return []
 
-def save_data(data):
-    """將資料寫入 JSON 檔案"""
-    print(f"準備將資料寫入到 {DATA_FILE}...")
-    # 確保 /data 目錄存在
-    os.makedirs(DATA_DIR, exist_ok=True)
-    
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    print("資料寫入成功！")
+def save_data_to_db(engine, events):
+    """將資料儲存到資料庫"""
+    if not events:
+        print("沒有活動資料可以儲存。")
+        return
+
+    with engine.connect() as conn:
+        # 為了簡單起見，每次都清空舊資料再插入新的
+        conn.execute(text("TRUNCATE TABLE events RESTART IDENTITY;"))
+        print("清空舊資料完成。")
+        
+        # 插入新資料
+        for event in events:
+            stmt = text("""
+                INSERT INTO events (title, url, start_time, platform, image)
+                VALUES (:title, :url, :start_time, :platform, :image)
+                ON CONFLICT (url) DO NOTHING;
+            """)
+            conn.execute(stmt, event)
+        
+        conn.commit()
+        print(f"成功將 {len(events)} 筆新資料寫入資料庫。")
 
 if __name__ == "__main__":
-    # 這裡可以加入更多平台的爬蟲函式
-    all_events = []
-    
-    kktix_events = fetch_kktix_events()
-    if kktix_events:
-        all_events.extend(kktix_events)
-    
-    # 未來加入其他平台...
-    # topx_events = fetch_topx_events()
-    # if topx_events:
-    #     all_events.extend(topx_events)
+    if not DATABASE_URL:
+        raise Exception("環境變數 DATABASE_URL 未設定")
 
-    if all_events:
-        save_data(all_events)
-    else:
-        print("沒有抓取到任何活動，不更新資料檔案。")
+    # 'postgresql://' Heroku style to 'postgresql+psycopg2://' SQLAlchemy style
+    db_url_for_sqlalchemy = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+    engine = create_engine(db_url_for_sqlalchemy)
+    
+    setup_database(engine)
+    
+    all_events = fetch_kktix_events()
+    
+    save_data_to_db(engine, all_events)
