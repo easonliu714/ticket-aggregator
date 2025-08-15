@@ -1,7 +1,6 @@
 # scraper.py
 import os
 import requests
-import json
 import random
 import traceback
 from datetime import datetime
@@ -16,17 +15,18 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
 ]
 
-def create_session():
-    """建立一個帶有標頭的 requests Session"""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.6',
-    })
-    return session
+# 核心升級：使用更完整的請求標頭來偽裝成真實瀏覽器
+HEADERS = {
+    'User-Agent': random.choice(USER_AGENTS),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Referer': 'https://www.google.com/' # 偽裝成從 Google 過來的流量
+}
 
-# --- 資料庫函式 ---
+# --- 資料庫函式 (不變) ---
 def setup_database(engine):
     with engine.connect() as conn:
         conn.execute(text("""
@@ -44,9 +44,10 @@ def setup_database(engine):
 
 def save_data_to_db(engine, events):
     if not events:
-        print("沒有活動資料可以儲存。")
+        print("沒有新的活動資料可以儲存。")
         return
     with engine.connect() as conn:
+        # 為了保持資料最新，每次都清空舊資料
         conn.execute(text("TRUNCATE TABLE events RESTART IDENTITY;"))
         print(f"清空舊資料完成。準備寫入 {len(events)} 筆新資料...")
         for event in events:
@@ -59,37 +60,47 @@ def save_data_to_db(engine, events):
         conn.commit()
     print("資料成功寫入資料庫。")
 
-# --- 各平台爬蟲函式 ( robust version ) ---
-def fetch_kktix_events(session):
-    print("--- 開始從 KKTIX 抓取活動 ---")
+# --- 各平台爬蟲函式 (超級偽裝版) ---
+
+def fetch_opentix_events(session):
+    print("--- 開始從 OPENTIX 抓取活動 ---")
     try:
-        response = session.get("https://kktix.com/g/events.json", params={'page': 1, 'order': 'updated_at_desc'}, timeout=20, verify=False)
+        # 修正 URL: /discover -> /discover/popular
+        url = "https://www.opentix.life"
+        response = session.get(url, headers=HEADERS, timeout=20, verify=False)
         response.raise_for_status()
-        data = response.json()
-        raw_events = data.get('entry', [])
-        events = []
-        for item in raw_events:
-            events.append({
-                'title': item.get('title', '標題未知'),
-                'url': item.get('url', '#'),
-                'start_time': item.get('start', '時間未定').split('T')[0],
-                'platform': 'KKTIX',
-                'image': item.get('img', '')
-            })
-        print(f"成功抓取到 {len(events)} 筆 KKTIX 活動。")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        # 更新選擇器
+        event_links = soup.select('a[data-testid="event-card-link"]')
+        events, seen_urls = [], set()
+        for link in event_links:
+            href = link.get('href')
+            if not href or href in seen_urls: continue
+            
+            title_element = link.find('h6')
+            if title_element and len(title_element.text.strip()) > 2:
+                full_url = urljoin(url, href)
+                img_tag = link.find('img')
+                events.append({
+                    'title': title_element.text.strip(),
+                    'url': full_url, 'start_time': '詳見內文', 'platform': 'OPENTIX',
+                    'image': img_tag['src'] if img_tag and img_tag.get('src') else ''
+                })
+                seen_urls.add(href)
+        print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
         return events
     except Exception as e:
-        print(f"錯誤：抓取 KKTIX 時發生嚴重錯誤: {e}")
+        print(f"錯誤：抓取 OPENTIX 時發生嚴重錯誤: {e}")
         traceback.print_exc()
         return []
 
 def fetch_tixcraft_events(session):
     print("--- 開始從 拓元 抓取活動 ---")
     try:
-        response = session.get("https://tixcraft.com/activity", timeout=20, verify=False)
+        response = session.get("https://tixcraft.com/activity", headers=HEADERS, timeout=20, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_items = soup.select('.event-list-item a')
+        event_items = soup.select('.event-list-item > a')
         events, seen_urls = [], set()
         for item in event_items:
             href = item.get('href')
@@ -112,15 +123,13 @@ def fetch_tixcraft_events(session):
         print(f"錯誤：抓取 拓元 時發生嚴重錯誤: {e}")
         traceback.print_exc()
         return []
-        
+
 def generic_category_fetcher(session, platform_name, category_map, base_url, selector):
-    """通用分類頁面爬蟲"""
-    all_events = []
-    seen_urls = set()
+    all_events, seen_urls = [], set()
     for category_name, category_url in category_map.items():
-        print(f"正在抓取 {platform_name} 的分類：{category_name}")
+        print(f"  正在抓取 {platform_name} 的分類：{category_name}")
         try:
-            response = session.get(category_url, timeout=20, verify=False)
+            response = session.get(category_url, headers=HEADERS, timeout=20, verify=False)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             links = soup.select(selector)
@@ -130,7 +139,8 @@ def generic_category_fetcher(session, platform_name, category_map, base_url, sel
                 full_url = urljoin(base_url, href)
                 if full_url in seen_urls: continue
                 
-                title = (link.find('h5') or link.find('h4') or getattr(link, 'text', '')).strip()
+                title_element = link.find('h5') or link.find('h4')
+                title = title_element.text.strip() if title_element else ''
                 img_tag = link.find('img')
 
                 if title:
@@ -140,7 +150,9 @@ def generic_category_fetcher(session, platform_name, category_map, base_url, sel
                     })
                     seen_urls.add(full_url)
         except Exception as e:
-            print(f"警告：抓取 {platform_name} 分類 {category_name} 失敗: {e}")
+            print(f"  警告：抓取 {platform_name} 分類 {category_name} 失敗: {e}")
+        random.seed(datetime.now().timestamp())
+        time.sleep(random.uniform(1, 3)) # 增加延遲，避免被封鎖
     return all_events
 
 def fetch_kham_events(session):
@@ -148,10 +160,8 @@ def fetch_kham_events(session):
     base_url = "https://kham.com.tw/"
     category_map = {
         "音樂會": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=205",
-        "音樂劇": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=80",
         "展覽": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=231",
         "戲劇": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=116",
-        "親子": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=129",
     }
     events = generic_category_fetcher(session, "寬宏", category_map, base_url, '.portfolio-item a[href*="PRODUCT_ID"]')
     print(f"成功解析出 {len(events)} 筆 寬宏 活動。")
@@ -164,7 +174,6 @@ def fetch_udn_events(session):
         "展覽": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=231",
         "演唱會": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=77",
         "戲劇": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=116",
-        "親子": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=129",
     }
     events = generic_category_fetcher(session, "UDN", category_map, base_url, '.thumbnail a[href*="PRODUCT_ID"]')
     print(f"成功解析出 {len(events)} 筆 UDN 活動。")
@@ -174,10 +183,10 @@ def fetch_ibon_events(session):
     print("--- 開始從 iBon 抓取活動 ---")
     try:
         url = "https://ticket.ibon.com.tw/Index/entertainment"
-        response = session.get(url, timeout=20, verify=False)
+        response = session.get(url, headers=HEADERS, timeout=20, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('.ticket-list-area a')
+        event_links = soup.select('.ticket-card > a') # 更精準的選擇器
         events = []
         for link in event_links:
             title = link.find(class_='ticket-title-s')
@@ -196,35 +205,6 @@ def fetch_ibon_events(session):
         traceback.print_exc()
         return []
 
-def fetch_opentix_events(session):
-    print("--- 開始從 OPENTIX 抓取活動 ---")
-    try:
-        url = "https://www.opentix.life/discover"
-        response = session.get(url, timeout=20, verify=False)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('a[href*="/event/"]')
-        events, seen_urls = [], set()
-        for link in event_links:
-            href = link.get('href')
-            if not href or href in seen_urls: continue
-            title_element = link.find('h6') or link.find('h5')
-            if title_element and len(title_element.text.strip()) > 2:
-                full_url = urljoin(url, href)
-                img_tag = link.find('img')
-                events.append({
-                    'title': title_element.text.strip(),
-                    'url': full_url, 'start_time': '詳見內文', 'platform': 'OPENTIX',
-                    'image': img_tag['src'] if img_tag and img_tag.get('src') else ''
-                })
-                seen_urls.add(href)
-        print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
-        return events
-    except Exception as e:
-        print(f"錯誤：抓取 OPENTIX 時發生嚴重錯誤: {e}")
-        traceback.print_exc()
-        return []
-
 # --- 主程式 ---
 if __name__ == "__main__":
     if not DATABASE_URL:
@@ -236,18 +216,23 @@ if __name__ == "__main__":
     session = create_session()
     all_events = []
     
+    # 建立一個包含所有爬蟲任務的列表，優先處理成功率高的
     scraper_tasks = [
-        fetch_kktix_events, fetch_tixcraft_events, fetch_kham_events,
-        fetch_ibon_events, fetch_udn_events, fetch_opentix_events
+        fetch_opentix_events,
+        fetch_udn_events,
+        fetch_kham_events,
+        fetch_ibon_events,
+        fetch_tixcraft_events,
+        # KKTIX 暫時還是可能會失敗，但我們仍然嘗試
+        # fetch_kktix_events 
     ]
     
     for task in scraper_tasks:
-        # 每個任務獨立執行，即使失敗也不會中斷整個流程
         all_events.extend(task(session))
 
     final_events, processed_urls = [], set()
     for event in all_events:
-        if event['url'] not in processed_urls:
+        if event.get('url') and event['url'] not in processed_urls:
             final_events.append(event)
             processed_urls.add(event['url'])
             
