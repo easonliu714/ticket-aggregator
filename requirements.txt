@@ -1,6 +1,6 @@
 Flask
-requests
-gunicorn  # Render 官方推薦的正式環境 WSGI 伺服器
+requests # Render 官方推薦的正式環境 WSGI 伺服器
+gunicorn
 SQLAlchemy
 psycopg2-binary
 beautifulsoup4 # 拓元沒有公開的 API，我們必須直接分析它的網頁
