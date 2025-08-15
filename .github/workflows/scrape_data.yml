@@ -1,0 +1,31 @@
+name: Scrape Ticket Data
+
+on:
+  workflow_dispatch: # 允許手動觸發
+  schedule:
+    # 使用 cron 語法，此處為每小時的第 15 分鐘執行一次
+    - cron: '15 * * * *'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11' # 可以根據需求調整版本
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          # 將我們在 GitHub Secret 中設定的變數注入到環境中
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scraper.py
