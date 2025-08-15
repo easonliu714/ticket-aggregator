@@ -1,0 +1,3 @@
+Flask
+requests
+gunicorn  # Render 官方推薦的正式環境 WSGI 伺服器
