@@ -16,7 +16,7 @@ USER_AGENTS = [
 ]
 
 def create_session():
-    """建立一個帶有標頭和重試機制的 requests Session"""
+    """建立一個帶有標頭的 requests Session"""
     session = requests.Session()
     session.headers.update({
         'User-Agent': random.choice(USER_AGENTS),
@@ -42,6 +42,7 @@ def setup_database(engine):
             );
         """))
         conn.commit()
+        print("資料庫資料表 'events' 確認完畢。")
 
 def save_data_to_db(engine, events):
     """將資料儲存到資料庫"""
@@ -57,26 +58,27 @@ def save_data_to_db(engine, events):
                 VALUES (:title, :url, :start_time, :platform, :image)
                 ON CONFLICT (url) DO NOTHING;
             """)
-            conn.execute(stmt, event)
+            conn.execute(stmt, {'title': event['title'], 'url': event['url'], 'start_time': event['start_time'], 'platform': event['platform'], 'image': event['image']})
         conn.commit()
         print(f"成功將資料寫入資料庫。")
 
-# --- 各平台爬蟲函式 ---
+# --- 各平台爬蟲函式 (修正版) ---
 
 def fetch_kktix_events(session):
     print("開始從 KKTIX 抓取活動...")
     try:
-        # 修正 SSL 錯誤：加入 verify=False
         response = session.get("https://kktix.com/g/events.json?order=updated_at_desc&page=1", timeout=15, verify=False)
         response.raise_for_status()
         data = response.json()
         raw_events = data.get('entry', [])
         events = []
         for event in raw_events:
+            start_dt = datetime.fromisoformat(event.get('start', '').replace('Z', '+00:00'))
+            formatted_time = start_dt.strftime('%Y-%m-%d %H:%M')
             events.append({
                 'title': event.get('title', '標題未知'),
                 'url': event.get('url', '#'),
-                'start_time': event.get('start', '時間未定'),
+                'start_time': formatted_time,
                 'platform': 'KKTIX',
                 'image': event.get('img') or ''
             })
@@ -92,19 +94,30 @@ def fetch_tixcraft_events(session):
         response = session.get("https://tixcraft.com/activity", timeout=15, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('a[href*="/activity/detail/"]')
+        event_items = soup.select('.event-list-item a')
+        print(f"拓元：找到 {len(event_items)} 個可能的活動連結。")
         events = []
-        for link in event_links:
-            title = link.find('h4', class_='event-name')
-            if title and link.get('href'):
+        seen_urls = set()
+        for item in event_items:
+            href = item.get('href')
+            if not href or 'detail' not in href:
+                continue
+            full_url = urljoin("https://tixcraft.com/", href)
+            if full_url in seen_urls:
+                continue
+            title = item.find('h4', class_='event-name')
+            date = item.find('p', class_='event-date')
+            img_tag = item.find('img')
+            if title:
                 events.append({
                     'title': title.text.strip(),
-                    'url': urljoin("https://tixcraft.com/", link['href']),
-                    'start_time': '詳見內文',
+                    'url': full_url,
+                    'start_time': date.text.strip() if date else '詳見內文',
                     'platform': '拓元',
-                    'image': ''
+                    'image': img_tag['src'] if img_tag else ''
                 })
-        print(f"成功抓取到 {len(events)} 筆 拓元 活動。")
+                seen_urls.add(full_url)
+        print(f"成功解析出 {len(events)} 筆 拓元 活動。")
         return events
     except requests.RequestException as e:
         print(f"錯誤：請求 拓元 網站時發生錯誤: {e}")
@@ -117,19 +130,21 @@ def fetch_kham_events(session):
         response = session.get(url, timeout=15, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('a[href*="UTK02/UTK0201_.aspx?PRODUCT_ID="]')
+        event_links = soup.select('.portfolio-item a[href*="PRODUCT_ID"]')
+        print(f"寬宏：找到 {len(event_links)} 個可能的活動連結。")
         events = []
         for link in event_links:
-            title_element = link.find('h5')
-            if title_element and link.get('href'):
+            title = link.find('h5')
+            img_tag = link.find('img')
+            if title and link.get('href'):
                 events.append({
-                    'title': title_element.text.strip(),
+                    'title': title.text.strip(),
                     'url': urljoin(url, link['href']),
                     'start_time': '詳見內文',
                     'platform': '寬宏',
-                    'image': ''
+                    'image': urljoin(url, img_tag['src']) if img_tag else ''
                 })
-        print(f"成功抓取到 {len(events)} 筆 寬宏 活動。")
+        print(f"成功解析出 {len(events)} 筆 寬宏 活動。")
         return events
     except requests.RequestException as e:
         print(f"錯誤：請求 寬宏 網站時發生錯誤: {e}")
@@ -138,23 +153,25 @@ def fetch_kham_events(session):
 def fetch_ibon_events(session):
     print("開始從 iBon 抓取活動...")
     try:
-        url = "https://ticket.ibon.com.tw/"
+        url = "https://ticket.ibon.com.tw/Index/entertainment"
         response = session.get(url, timeout=15, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('a[href*="/activity/detail"]')
+        event_links = soup.select('.ticket-list-area a')
+        print(f"iBon：找到 {len(event_links)} 個可能的活動連結。")
         events = []
         for link in event_links:
             title = link.find(class_='ticket-title-s')
+            img_tag = link.find('img')
             if title and link.get('href'):
                 events.append({
                     'title': title.text.strip(),
                     'url': urljoin(url, link['href']),
                     'start_time': '詳見內文',
                     'platform': 'iBon',
-                    'image': ''
+                    'image': img_tag['src'] if img_tag and img_tag.get('src') else ''
                 })
-        print(f"成功抓取到 {len(events)} 筆 iBon 活動。")
+        print(f"成功解析出 {len(events)} 筆 iBon 活動。")
         return events
     except requests.RequestException as e:
         print(f"錯誤：請求 iBon 網站時發生錯誤: {e}")
@@ -167,19 +184,21 @@ def fetch_udn_events(session):
         response = session.get(url, timeout=15, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        event_links = soup.select('a[href*="UTK02/UTK0201_.aspx?PRODUCT_ID="]')
+        event_links = soup.select('.thumbnail a[href*="PRODUCT_ID"]')
+        print(f"UDN：找到 {len(event_links)} 個可能的活動連結。")
         events = []
         for link in event_links:
-            title = link.find('div', class_='caption').find('h4')
+            title = link.find('h4')
+            img_tag = link.find('img')
             if title and link.get('href'):
                 events.append({
                     'title': title.text.strip(),
                     'url': urljoin(url, link['href']),
                     'start_time': '詳見內文',
                     'platform': 'UDN',
-                    'image': ''
+                    'image': urljoin(url, img_tag['src']) if img_tag else ''
                 })
-        print(f"成功抓取到 {len(events)} 筆 UDN 活動。")
+        print(f"成功解析出 {len(events)} 筆 UDN 活動。")
         return events
     except requests.RequestException as e:
         print(f"錯誤：請求 UDN 網站時發生錯誤: {e}")
@@ -193,29 +212,30 @@ def fetch_opentix_events(session):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         event_links = soup.select('a[href*="/event/"]')
+        print(f"OPENTIX：找到 {len(event_links)} 個可能的活動連結。")
         events = []
-        # 使用 set 來過濾重複的 URL
         seen_urls = set()
         for link in event_links:
             href = link.get('href')
-            if href and href not in seen_urls:
-                title_element = link.find('h6')
-                if title_element:
-                    full_url = urljoin(url, href)
-                    events.append({
-                        'title': title_element.text.strip(),
-                        'url': full_url,
-                        'start_time': '詳見內文',
-                        'platform': 'OPENTIX',
-                        'image': ''
-                    })
-                    seen_urls.add(href)
-        print(f"成功抓取到 {len(events)} 筆 OPENTIX 活動。")
+            if not href or href in seen_urls: continue
+            
+            title_element = link.find('h6') or link.find('h5') or link.find('h4')
+            if title_element and len(title_element.text.strip()) > 2:
+                full_url = urljoin(url, href)
+                img_tag = link.find('img')
+                events.append({
+                    'title': title_element.text.strip(),
+                    'url': full_url,
+                    'start_time': '詳見內文',
+                    'platform': 'OPENTIX',
+                    'image': img_tag['src'] if img_tag and img_tag.get('src') else ''
+                })
+                seen_urls.add(href)
+        print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
         return events
     except requests.RequestException as e:
         print(f"錯誤：請求 OPENTIX 網站時發生錯誤: {e}")
         return []
-
 
 # --- 主程式 ---
 if __name__ == "__main__":
@@ -230,7 +250,6 @@ if __name__ == "__main__":
     session = create_session()
     all_events = []
 
-    # 依序執行所有平台的爬蟲
     all_events.extend(fetch_kktix_events(session))
     all_events.extend(fetch_tixcraft_events(session))
     all_events.extend(fetch_kham_events(session))
@@ -238,7 +257,6 @@ if __name__ == "__main__":
     all_events.extend(fetch_udn_events(session))
     all_events.extend(fetch_opentix_events(session))
 
-    # 過濾掉重複的 URL，並以第一個出現的為準
     final_events = []
     processed_urls = set()
     for event in all_events:
