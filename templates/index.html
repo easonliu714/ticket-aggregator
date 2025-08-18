@@ -11,21 +11,23 @@
     <div class="container my-4">
         <h2>票券整合平台</h2>
         <p class="text-muted">{{ current_date }}</p>
-        <p>HTML Version: v1.2</p>  <!-- 添加版本顯示 -->
+        <p>HTML Version: v1.3</p>  <!-- 更新版本 -->
 
         <div class="card mb-4">
             <div class="card-body">
                 <h5>平台狀態</h5>
-                <ul class="list-group">
+                <div class="row row-cols-1 row-cols-md-2 g-2">  <!-- 平台列表兩欄 -->
                     {% for platform, count in platform_status.items() %}
-                    <a href="/platform/{{ platform }}" class="platform-item-link text-decoration-none">
-                        <li class="list-group-item d-flex justify-content-between align-items-center platform-item">
-                            <span class="platform-name">{{ platform }}</span>
-                            <span class="badge bg-primary rounded-pill">{{ count }}</span>
-                        </li>
-                    </a>
+                    <div class="col">
+                        <a href="/platform/{{ platform }}" class="platform-item-link text-decoration-none">
+                            <div class="list-group-item d-flex justify-content-between align-items-center platform-item">
+                                <span class="platform-name">{{ platform }}</span>
+                                <span class="badge bg-primary rounded-pill">{{ count }}</span>
+                            </div>
+                        </a>
+                    </div>
                     {% endfor %}
-                </ul>
+                </div>
             </div>
         </div>
 
@@ -55,7 +57,7 @@
         <p class="text-muted">最後更新: {{ last_update }}</p>
 
         {% if events %}
-        <div class="row row-cols-1 row-cols-md-2 g-4">  <!-- 確認兩欄 -->
+        <div class="row row-cols-1 row-cols-md-2 g-4">  <!-- 活動列表兩欄 -->
             {% for event in events %}
             <div class="col">
                 <div class="card event-card">
