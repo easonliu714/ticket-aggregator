@@ -16,7 +16,7 @@ engine = create_engine(db_url_for_sqlalchemy)
 
 def get_platform_status():
     """計算每個平台的活動總數"""
-    platform_names = ["KKTIX", "拓元", "寬宏", "iBon", "UDN", "OPENTIX"]
+    platform_names = ["KKTIX", "拓元", "寬宏", "iBon", "UDN", "OPENTIX", "Event Go"]  # 新增Event Go
     status = {name: 0 for name in platform_names}
     try:
         with engine.connect() as conn:
@@ -57,7 +57,7 @@ def home():
         platform_status=platform_status,
         current_date=current_time["date"],
         last_update=current_time["time"],
-        page_title="所有最新活動" # 新增頁面標題
+        page_title="所有最新活動"
     )
 
 @app.route('/platform/<platform_name>')
@@ -81,7 +81,7 @@ def platform_page(platform_name):
         platform_status=platform_status,
         current_date=current_time["date"],
         last_update=current_time["time"],
-        page_title=f"{platform_name} 所有活動" # 動態頁面標題
+        page_title=f"{platform_name} 所有活動"
     )
 
 if __name__ == "__main__":
