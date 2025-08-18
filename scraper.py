@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import cloudscraper  # 用於繞過403
 
 # 引入 Selenium 相關函式庫
 from selenium import webdriver
@@ -18,7 +19,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 設定區 ---
-SCRAPER_VERSION = "v8.0"  # 更新版本
+SCRAPER_VERSION = "v8.2"  # 更新版本
 DATABASE_URL = os.environ.get('DATABASE_URL')
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -27,7 +28,9 @@ USER_AGENTS = [
 BASE_HEADERS = {'User-Agent': random.choice(USER_AGENTS),'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8','Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.6'}
 
 # --- 函式定義區 ---
-def create_session():
+def create_session(use_cloudscraper=False):
+    if use_cloudscraper:
+        return cloudscraper.create_scraper()
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
     return session
@@ -54,7 +57,7 @@ def save_data_to_db(engine, events):
         conn.commit()
     print("資料成功寫入資料庫。")
     
-def get_dynamic_page_source(url, wait_time=5):
+def get_dynamic_page_source(url, wait_time=10):
     print(f"  使用 Selenium 抓取: {url}")
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
@@ -66,7 +69,7 @@ def get_dynamic_page_source(url, wait_time=5):
         driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
         driver.get(url)
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(wait_time)  # 優化等待時間
+        time.sleep(wait_time)
         page_source = driver.page_source
         driver.quit()
         return page_source
@@ -75,38 +78,36 @@ def get_dynamic_page_source(url, wait_time=5):
         if driver: driver.quit()
         return None
 
-# --- 通用分類抓取函式 (改進版，添加image抓取) ---
-def generic_category_fetcher(session, platform_name, category_map, base_url, link_selector, title_selector, image_selector):
+# --- 通用分類抓取函式 (修正選擇器) ---
+def generic_category_fetcher(session, platform_name, category_map, base_url, item_selector, title_selector, image_selector, use_cloudscraper=False):
     all_events, seen_urls = [], set()
+    scraper = create_session(use_cloudscraper)
     for category_name, category_url in category_map.items():
         print(f"  正在抓取 {platform_name} 的分類：{category_name}")
         try:
-            response = session.get(category_url, timeout=20, verify=False)
+            response = scraper.get(category_url, timeout=20, verify=False)
             response.raise_for_status()
             html_content = response.text
             print(f"    成功下載頁面，長度: {len(html_content)} bytes")
             soup = BeautifulSoup(html_content, 'html.parser')
-            items = soup.select(link_selector)  # 改用更廣泛的item selector
+            items = soup.select(item_selector)
             for item in items:
-                link = item.select_one('a')  # 假設每個item有a連結
-                if not link: continue
-                href = link.get('href')
-                if not href: continue
-                full_url = urljoin(base_url, href)
-                if full_url in seen_urls: continue
                 title_elem = item.select_one(title_selector)
                 title = title_elem.text.strip() if title_elem else ''
-                if title and len(title) > 3 and "more" not in title.lower():
-                    img_elem = item.select_one(image_selector)
-                    image = urljoin(base_url, img_elem['src']) if img_elem and img_elem.get('src') else ''
-                    all_events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': platform_name, 'image': image})
-                    seen_urls.add(full_url)
+                link = title_elem.get('href') if title_elem else item.select_one('a').get('href') if item.select_one('a') else None
+                if not link or not title or len(title) <= 3 or "more" in title.lower(): continue
+                full_url = urljoin(base_url, link)
+                if full_url in seen_urls: continue
+                img_elem = item.select_one(image_selector)
+                image = urljoin(base_url, img_elem.get('src') or img_elem.get('data-src', '')) if img_elem else ''
+                all_events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': platform_name, 'image': image})
+                seen_urls.add(full_url)
         except Exception as e:
             print(f"  警告：抓取 {platform_name} 分類 {category_name} 失敗: {e}")
         time.sleep(random.uniform(1.5, 3))
     return all_events
 
-# --- OPENTIX (已好，保留image) ---
+# --- OPENTIX (保留) ---
 def fetch_opentix_events(session):
     print("--- 開始從 OPENTIX 抓取活動 ---")
     try:
@@ -136,7 +137,7 @@ def fetch_opentix_events(session):
     except Exception as e:
         print(f"錯誤：抓取 OPENTIX 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
 
-# --- 寬宏 (添加image抓取) ---
+# --- 寬宏 (保留) ---
 def fetch_kham_events(session):
     print("--- 開始從 寬宏 抓取活動 ---")
     base_url = "https://kham.com.tw/"
@@ -146,15 +147,14 @@ def fetch_kham_events(session):
         "戲劇表演": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=116",
         "親子活動": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=129",
     }
-    # 使用通用fetcher，指定選擇器 (參考show_news_v12.py結構)
     events = generic_category_fetcher(session, "寬宏", category_map, base_url, 
-                                      link_selector='div.product_list',  # 每個事件item
-                                      title_selector='div.product_name a',  # 標題
-                                      image_selector='div.product_img img')  # 圖片
+                                      item_selector='ul#product_list li', 
+                                      title_selector='div.product_name a', 
+                                      image_selector='div.product_img img.lazy')
     print(f"成功解析出 {len(events)} 筆 寬宏 活動。")
     return events
 
-# --- UDN (添加image抓取) ---
+# --- UDN (保留) ---
 def fetch_udn_events(session):
     print("--- 開始從 UDN 抓取活動 ---")
     base_url = "https://tickets.udnfunlife.com/"
@@ -164,31 +164,30 @@ def fetch_udn_events(session):
         "戲劇表演": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=116",
     }
     events = generic_category_fetcher(session, "UDN", category_map, base_url, 
-                                      link_selector='div.product_list', 
+                                      item_selector='ul#product_list li', 
                                       title_selector='div.product_name a', 
-                                      image_selector='div.product_img img')
+                                      image_selector='div.product_img img.lazy')
     print(f"成功解析出 {len(events)} 筆 UDN 活動。")
     return events
 
-# --- iBon (修復選擇器，添加image，參考show_news_v12.py) ---
+# --- iBon (保留) ---
 def fetch_ibon_events(session):
     print("--- 開始從 iBon 抓取活動 ---")
     try:
         url = "https://ticket.ibon.com.tw/Index/entertainment"
-        html_content = get_dynamic_page_source(url, wait_time=10)  # 增加等待以確保動態載入
+        html_content = get_dynamic_page_source(url, wait_time=15)  # 增加等待
         if not html_content: return []
         print(f"  成功下載 iBon 頁面，長度: {len(html_content)} bytes")
         soup = BeautifulSoup(html_content, 'html.parser')
-        # 改用更穩定的選擇器 (參考show_news_v12.py: 使用事件item div)
-        event_items = soup.select('div.event-item')  # 假設結構為div.event-item
+        event_items = soup.select('div.ticket-item')  # 修正選擇器
         events = []
         for item in event_items:
             link = item.select_one('a[href*="/activity/detail"]')
             if not link: continue
-            title_elem = item.select_one('.ticket-title-s, .ticket-name')
+            title_elem = item.select_one('.ticket-title, .ticket-name')
             title = title_elem.text.strip() if title_elem else ''
-            img_elem = item.select_one('img')
-            image = urljoin(url, img_elem['src'] or img_elem.get('data-src', '')) if img_elem else ''
+            img_elem = item.select_one('img.ticket-img')
+            image = urljoin(url, img_elem.get('src') or img_elem.get('data-src', '')) if img_elem else ''
             if title:
                 full_url = urljoin("https://ticket.ibon.com.tw/", link['href'])
                 events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'iBon', 'image': image})
@@ -197,17 +196,18 @@ def fetch_ibon_events(session):
     except Exception as e:
         print(f"錯誤：抓取 iBon 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
 
-# --- 新增 KKTIX (參考show_news_v12.py) ---
+# --- KKTIX (保留) ---
 def fetch_kktix_events(session):
     print("--- 開始從 KKTIX 抓取活動 ---")
     base_url = "https://kktix.com/"
     try:
         url = "https://kktix.com/events"
-        response = session.get(url, timeout=20, verify=False)
+        scraper = create_session(use_cloudscraper=True)
+        response = scraper.get(url, timeout=20, verify=False)
         response.raise_for_status()
         html_content = response.text
         soup = BeautifulSoup(html_content, 'html.parser')
-        event_items = soup.select('li.event-item')
+        event_items = soup.select('ul.event-list li')
         events, seen_urls = [], set()
         for item in event_items:
             link = item.select_one('a.event-link')
@@ -216,66 +216,88 @@ def fetch_kktix_events(session):
             full_url = urljoin(base_url, href)
             if full_url in seen_urls: continue
             title = item.select_one('.event-title').text.strip()
-            img = item.select_one('img.event-image')['src']
+            img_elem = item.select_one('img.event-image')
+            image = img_elem['src'] if img_elem else ''
             if title:
-                events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'KKTIX', 'image': img})
+                events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'KKTIX', 'image': image})
                 seen_urls.add(full_url)
         print(f"成功解析出 {len(events)} 筆 KKTIX 活動。")
         return events
     except Exception as e:
         print(f"錯誤：抓取 KKTIX 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
 
-# --- 新增 拓元 (TixCraft, 參考show_news_v12.py，使用Selenium因為動態) ---
+# --- 拓元 (保留) ---
 def fetch_tixcraft_events(session):
     print("--- 開始從 拓元 抓取活動 ---")
     try:
         url = "https://tixcraft.com/activity"
-        html_content = get_dynamic_page_source(url, wait_time=8)
+        html_content = get_dynamic_page_source(url, wait_time=10)
         if not html_content: return []
         soup = BeautifulSoup(html_content, 'html.parser')
-        event_items = soup.select('div.activity-item')
+        event_items = soup.select('div.activity-block')
         events = []
         for item in event_items:
-            link = item.select_one('a')
+            link = item.select_one('a.activity-link')
             if not link: continue
             title = item.select_one('.activity-name').text.strip()
-            img = item.select_one('img')['src']
+            img_elem = item.select_one('.activity-thumbnail img')
+            image = urljoin(url, img_elem['src']) if img_elem else ''
             full_url = urljoin("https://tixcraft.com/", link['href'])
             if title:
-                events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': '拓元', 'image': img})
+                events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': '拓元', 'image': image})
         print(f"成功解析出 {len(events)} 筆 拓元 活動。")
         return events
     except Exception as e:
         print(f"錯誤：抓取 拓元 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
 
-# --- 新增 Event Go (新平台，假設結構類似) ---
+# --- 年代售票 (保留) ---
+def fetch_ticket_events(session):
+    print("--- 開始從 年代售票 抓取活動 ---")
+    base_url = "https://www.ticket.com.tw/"
+    category_map = {
+        "音樂會/演唱會": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=1",
+        "展覽/博覽": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=3",
+        "戲劇表演": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=2",
+        "親子活動": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=4",
+    }
+    events = generic_category_fetcher(session, "年代", category_map, base_url, 
+                                      item_selector='ul#product_list li', 
+                                      title_selector='div.product_name a', 
+                                      image_selector='div.product_img img.lazy')
+    print(f"成功解析出 {len(events)} 筆 年代 活動。")
+    return events
+
+# --- 新增 Event GO (使用正確 URL，並濾除非 /event/detail 的連結) ---
 def fetch_eventgo_events(session):
-    print("--- 開始從 Event Go 抓取活動 ---")
-    base_url = "https://eventgo.tw/"
+    print("--- 開始從 Event GO 抓取活動 ---")
+    base_url = "https://eventgo.bnextmedia.com.tw/"
     try:
-        url = "https://eventgo.tw/events"
-        response = session.get(url, timeout=20, verify=False)
+        url = base_url + "event/list"  # 使用列表頁
+        scraper = create_session(use_cloudscraper=True)  # 以防反爬
+        response = scraper.get(url, timeout=20, verify=False)
         response.raise_for_status()
         html_content = response.text
+        print(f"  成功下載 Event GO 頁面，長度: {len(html_content)} bytes")
         soup = BeautifulSoup(html_content, 'html.parser')
-        event_items = soup.select('div.event-card')
+        event_items = soup.select('div.event-item, li.event-item')  # 通用選擇器，根據常見結構
         events, seen_urls = [], set()
         for item in event_items:
-            link = item.select_one('a')
+            link = item.select_one('a[href*="event/detail"]')  # 只選包含 /event/detail 的連結
             if not link: continue
             href = link.get('href')
             full_url = urljoin(base_url, href)
-            if full_url in seen_urls: continue
-            title = item.select_one('.event-title').text.strip()
-            img_elem = item.select_one('img')
-            image = urljoin(base_url, img_elem['src']) if img_elem else ''
-            if title:
-                events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'Event Go', 'image': image})
-                seen_urls.add(full_url)
-        print(f"成功解析出 {len(events)} 筆 Event Go 活動。")
+            if full_url in seen_urls or 'event/detail' not in full_url: continue  # 濾除非 /event/detail
+            title_elem = item.select_one('h3.event-title, .event-title')
+            title = title_elem.text.strip() if title_elem else link.text.strip()
+            if not title or len(title) <= 3: continue
+            img_elem = item.select_one('img.event-img, img')
+            image = urljoin(base_url, img_elem.get('src') or img_elem.get('data-src', '')) if img_elem else ''
+            events.append({'title': title, 'url': full_url, 'start_time': '詳見內文', 'platform': 'Event GO', 'image': image})
+            seen_urls.add(full_url)
+        print(f"成功解析出 {len(events)} 筆 Event GO 活動。")
         return events
     except Exception as e:
-        print(f"錯誤：抓取 Event Go 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
+        print(f"錯誤：抓取 Event GO 時發生嚴重錯誤: {e}"); traceback.print_exc(); return []
 
 # --- 主程式 ---
 if __name__ == "__main__":
@@ -295,9 +317,10 @@ if __name__ == "__main__":
         fetch_kham_events,
         fetch_udn_events,
         fetch_ibon_events,
-        fetch_kktix_events,  # 新增
-        fetch_tixcraft_events,  # 新增
-        fetch_eventgo_events,  # 新增
+        fetch_kktix_events,
+        fetch_tixcraft_events,
+        fetch_ticket_events,
+        fetch_eventgo_events,  # 新增回
     ]
     
     for task_func in scraper_tasks:
