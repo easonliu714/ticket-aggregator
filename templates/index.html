@@ -11,53 +11,69 @@
     <div class="container my-4">
         <h2>票券整合平台</h2>
         <p class="text-muted">{{ current_date }}</p>
+        <p>HTML Version: v1.2</p>  <!-- 添加版本顯示 -->
 
         <div class="card mb-4">
             <div class="card-body">
                 <h5>平台狀態</h5>
                 <ul class="list-group">
                     {% for platform, count in platform_status.items() %}
-                    <li class="list-group-item d-flex justify-content-between align-items-center">
-                        <span class="platform-name">{{ platform }}</span>
-                        <span class="badge bg-primary rounded-pill">{{ count }}</span>
-                    </li>
+                    <a href="/platform/{{ platform }}" class="platform-item-link text-decoration-none">
+                        <li class="list-group-item d-flex justify-content-between align-items-center platform-item">
+                            <span class="platform-name">{{ platform }}</span>
+                            <span class="badge bg-primary rounded-pill">{{ count }}</span>
+                        </li>
+                    </a>
                     {% endfor %}
                 </ul>
             </div>
         </div>
 
-        <div class="mb-4">
-            <input type="text" class="form-control" placeholder="搜尋活動名稱、藝人或場地...">
-            <select class="form-select mt-2">
-                <option>所有類型</option>
+        <form method="GET" class="mb-4">
+            <input type="text" name="search" class="form-control" placeholder="搜尋活動名稱、藝人或場地..." value="{{ request.args.get('search', '') }}">
+            <select name="type" class="form-select mt-2">
+                <option value="">所有類型</option>
+                <option value="音樂會" {% if request.args.get('type') == '音樂會' %}selected{% endif %}>音樂會/演唱會</option>
+                <option value="展覽" {% if request.args.get('type') == '展覽' %}selected{% endif %}>展覽/博覽</option>
+                <option value="戲劇" {% if request.args.get('type') == '戲劇' %}selected{% endif %}>戲劇表演</option>
+                <option value="親子" {% if request.args.get('type') == '親子' %}selected{% endif %}>親子活動</option>
             </select>
-            <select class="form-select mt-2">
-                <option>所有平台</option>
+            <select name="platform" class="form-select mt-2">
+                <option value="">所有平台</option>
+                {% for plat in platform_status.keys() %}
+                <option value="{{ plat }}" {% if request.args.get('platform') == plat %}selected{% endif %}>{{ plat }}</option>
+                {% endfor %}
             </select>
-            <select class="form-select mt-2">
-                <option>依日期排序</option>
+            <select name="sort" class="form-select mt-2">
+                <option value="id DESC" {% if request.args.get('sort') == 'id DESC' %}selected{% endif %}>依日期排序 (新到舊)</option>
+                <option value="id ASC" {% if request.args.get('sort') == 'id ASC' %}selected{% endif %}>依日期排序 (舊到新)</option>
             </select>
-        </div>
+            <button type="submit" class="btn btn-primary mt-2">篩選</button>
+        </form>
 
         <h4>{{ page_title }} (共 {{ events|length }} 個活動)</h4>
         <p class="text-muted">最後更新: {{ last_update }}</p>
 
         {% if events %}
+        <div class="row row-cols-1 row-cols-md-2 g-4">  <!-- 確認兩欄 -->
             {% for event in events %}
-            <div class="card event-card mb-3">
-                <div class="row g-0">
-                    <div class="col-md-4" style="background-image: url('{{ event.image }}'); background-size: cover; min-height: 150px;" class="event-image"></div>  <!-- 確保使用完整image URL -->
-                    <div class="col-md-8">
-                        <div class="card-body">
-                            <h5 class="card-title event-title">{{ event.title }}</h5>
-                            <p class="card-text"><small class="text-muted">{{ event.start_time }}</small></p>
-                            <span class="badge platform-badge {{ event.platform.lower() }}">{{ event.platform }}</span>
-                            <a href="{{ event.url }}" class="btn btn-primary btn-sm float-end" target="_blank">前往購票</a>
+            <div class="col">
+                <div class="card event-card">
+                    <div class="row g-0">
+                        <div class="col-md-4 event-image" style="background-image: url('{{ event.image }}');"></div>
+                        <div class="col-md-8">
+                            <div class="card-body">
+                                <h5 class="card-title event-title">{{ event.title }}</h5>
+                                <p class="card-text"><small class="text-muted">{{ event.start_time }}</small></p>
+                                <span class="badge platform-badge {{ event.platform.lower() }}">{{ event.platform }}</span>
+                                <a href="{{ event.url }}" class="btn btn-primary btn-sm float-end" target="_blank">前往購票</a>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
             {% endfor %}
+        </div>
         {% else %}
             <div class="alert alert-info">
                 沒有找到活動<br>可能是爬蟲正在更新，或此平台暫無活動
