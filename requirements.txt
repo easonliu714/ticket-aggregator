@@ -5,6 +5,4 @@ SQLAlchemy
 psycopg2-binary
 beautifulsoup4
 pytz
-selenium
-webdriver-manager
 cloudscraper
