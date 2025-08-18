@@ -10,12 +10,11 @@ from urllib.parse import urljoin
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import cloudscraper
 
 # 禁用SSL警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-SCRAPER_VERSION = "v10.0"
+SCRAPER_VERSION = "v11.0"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 USER_AGENTS = [
@@ -25,22 +24,27 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
 ]
 
-def create_session():
+def create_robust_session():
+    """仿照show_news_v12.py的成功經驗創建session"""
     session = requests.Session()
+    
+    # 更保守的重試策略
     retry = Retry(
-        total=3, 
-        read=3, 
-        connect=3, 
-        backoff_factor=2, 
-        status_forcelist=(429, 500, 502, 503, 504, 403, 401)
+        total=2, 
+        read=2, 
+        connect=2, 
+        backoff_factor=0.6, 
+        status_forcelist=(429, 500, 502, 503, 504)  # 移除403, 401避免過度重試
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
+    
+    # 更真實的headers，參考show_news_v12.py
     session.headers.update({
         'User-Agent': random.choice(USER_AGENTS),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.6',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
@@ -51,112 +55,105 @@ def create_session():
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none'
     })
-    # 關閉SSL驗證以避免證書問題
+    
     session.verify = False
     return session
 
-def create_cloudscraper():
-    return cloudscraper.create_scraper(
-        browser={'custom': random.choice(USER_AGENTS)},
-        delay=random.uniform(1, 3)
-    )
+def print_page_debug_info(html_content, platform_name, max_chars=2000):
+    """打印頁面調試資訊"""
+    if not html_content:
+        print(f"[DEBUG] {platform_name}: 無HTML內容")
+        return
+    
+    print(f"[DEBUG] {platform_name}: 頁面長度 {len(html_content)} bytes")
+    
+    # 打印頁面開頭
+    print(f"[DEBUG] {platform_name}: 頁面開頭內容:")
+    print("=" * 50)
+    print(html_content[:max_chars])
+    print("=" * 50)
+    
+    # 檢查是否包含常見的錯誤頁面標識
+    error_indicators = ['404', '403', 'error', 'blocked', 'captcha', '驗證', '錯誤', 'forbidden']
+    found_errors = [indicator for indicator in error_indicators if indicator.lower() in html_content.lower()]
+    if found_errors:
+        print(f"[DEBUG] {platform_name}: 發現錯誤指標: {found_errors}")
+    
+    # 檢查頁面結構
+    soup = BeautifulSoup(html_content, 'html.parser')
+    title = soup.find('title')
+    if title:
+        print(f"[DEBUG] {platform_name}: 頁面標題: {title.get_text(strip=True)}")
+    
+    # 檢查常見元素數量
+    common_tags = ['div', 'a', 'img', 'li', 'span']
+    for tag in common_tags:
+        count = len(soup.find_all(tag))
+        print(f"[DEBUG] {platform_name}: {tag} 元素數量: {count}")
 
-def safe_request(url, session=None, use_cloudscraper=False, platform_name="Unknown"):
-    """安全請求函數，包含多種fallback機制"""
-    print(f"正在請求 {platform_name}: {url}")
+def is_blocked_page(html_content, platform_name):
+    """更智能的反爬蟲檢測"""
+    if not html_content or len(html_content) < 500:
+        print(f"[DEBUG] {platform_name}: 頁面過短，可能被攔截")
+        return True
     
-    methods = []
+    # 檢查明確的阻擋關鍵字（更嚴格的判斷）
+    strong_block_indicators = [
+        'blocked', 'captcha', 'verification required', '人機驗證',
+        'access denied', '拒絕訪問', 'robot', 'cloudflare'
+    ]
     
-    # 方法1：使用提供的session
-    if session and not use_cloudscraper:
-        methods.append(('regular_session', session))
+    for indicator in strong_block_indicators:
+        if indicator.lower() in html_content.lower():
+            print(f"[DEBUG] {platform_name}: 檢測到強阻擋指標: {indicator}")
+            return True
     
-    # 方法2：使用cloudscraper
-    try:
-        scraper = create_cloudscraper()
-        methods.append(('cloudscraper', scraper))
-    except:
-        print(f"{platform_name}: cloudscraper 初始化失敗")
+    return False
+
+def safe_request(url, session, platform_name="Unknown", max_attempts=2):
+    """安全請求函數，增強debug資訊"""
+    print(f"[DEBUG] 正在請求 {platform_name}: {url}")
     
-    # 方法3：創建新的session
-    if not session:
-        new_session = create_session()
-        methods.append(('new_session', new_session))
-    
-    for method_name, req_session in methods:
+    for attempt in range(max_attempts):
         try:
-            print(f"{platform_name}: 嘗試使用 {method_name}")
-            
-            # 隨機延遲
+            # 每次請求前稍作延遲
             time.sleep(random.uniform(1, 3))
             
-            # 設置超時和headers
+            # 設置這次請求的特殊headers
             headers = {
                 'User-Agent': random.choice(USER_AGENTS),
                 'Referer': f"https://{url.split('/')[2]}/",
                 'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8'
             }
             
-            resp = req_session.get(url, headers=headers, timeout=30, verify=False)
+            print(f"[DEBUG] {platform_name}: 第{attempt+1}次嘗試")
+            resp = session.get(url, headers=headers, timeout=30, verify=False)
             resp.raise_for_status()
             
-            print(f"{platform_name}: 成功獲取頁面，長度: {len(resp.text)} bytes")
+            print(f"[DEBUG] {platform_name}: HTTP狀態 {resp.status_code}")
+            print(f"[DEBUG] {platform_name}: 回應headers: {dict(resp.headers)}")
             
-            # 檢查是否被反爬蟲攔截
-            if len(resp.text) < 1000:
-                print(f"{platform_name}: 頁面長度過短，可能被攔截")
+            # 詳細debug頁面內容
+            print_page_debug_info(resp.text, platform_name)
+            
+            # 檢查是否被阻擋
+            if is_blocked_page(resp.text, platform_name):
+                print(f"[DEBUG] {platform_name}: 檢測到頁面被阻擋，嘗試下一種方法")
                 continue
-                
-            if any(blocked in resp.text.lower() for blocked in ['blocked', 'captcha', 'verification', '驗證']):
-                print(f"{platform_name}: 檢測到反爬蟲機制")
-                continue
-                
+            
             return resp.text, None
             
         except Exception as e:
             error_msg = str(e)
-            print(f"{platform_name}: {method_name} 失敗 - {error_msg}")
+            print(f"[DEBUG] {platform_name}: 第{attempt+1}次失敗 - {error_msg}")
             
-            # 特殊處理某些錯誤
             if '403' in error_msg:
-                print(f"{platform_name}: 403錯誤，可能被反爬蟲攔截")
+                print(f"[DEBUG] {platform_name}: 403錯誤，延長休息時間")
                 time.sleep(random.uniform(5, 10))
-            elif 'ssl' in error_msg.lower() or 'certificate' in error_msg.lower():
-                print(f"{platform_name}: SSL錯誤，已嘗試跳過驗證")
+            elif 'timeout' in error_msg.lower():
+                print(f"[DEBUG] {platform_name}: 超時錯誤，延長下次timeout")
             
-            continue
-    
-    return None, f"所有請求方法都失敗"
-
-def debug_page_content(html_content, platform_name, selector):
-    """調試頁面內容"""
-    if not html_content:
-        print(f"{platform_name}: 無HTML內容")
-        return
-        
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # 保存部分HTML用於調試
-    debug_file = f"debug_{platform_name.lower()}.html"
-    try:
-        with open(debug_file, 'w', encoding='utf-8') as f:
-            f.write(html_content[:50000])  # 只保存前50KB
-        print(f"{platform_name}: 已保存調試文件 {debug_file}")
-    except:
-        pass
-    
-    # 檢查selector
-    items = soup.select(selector)
-    print(f"{platform_name}: selector '{selector}' 找到 {len(items)} 個元素")
-    
-    # 如果沒找到，嘗試一些常見的選擇器
-    if len(items) == 0:
-        common_selectors = ['div', 'li', 'a', '.event', '.activity', '.product']
-        print(f"{platform_name}: 嘗試查找常見選擇器...")
-        for sel in common_selectors:
-            found = soup.select(sel)
-            if found:
-                print(f"{platform_name}: 找到 {len(found)} 個 '{sel}' 元素")
+    return None, "所有請求嘗試都失敗"
 
 def setup_database(engine):
     with engine.connect() as conn:
@@ -203,45 +200,92 @@ def safe_get_text(element, default="詳內文"):
     except Exception:
         return default
 
+def extract_events_with_debug(soup, selectors, platform_name):
+    """使用多個selector嘗試並debug"""
+    events = []
+    
+    for selector_name, selector in selectors.items():
+        print(f"[DEBUG] {platform_name}: 嘗試selector '{selector_name}': {selector}")
+        items = soup.select(selector)
+        print(f"[DEBUG] {platform_name}: selector '{selector_name}' 找到 {len(items)} 個元素")
+        
+        if items:
+            print(f"[DEBUG] {platform_name}: 使用 '{selector_name}' 解析活動")
+            for i, item in enumerate(items[:5]):  # 只處理前5個作為測試
+                print(f"[DEBUG] {platform_name}: 處理第{i+1}個元素: {str(item)[:200]}...")
+                
+                # 嘗試提取連結和標題
+                link_elem = item.select_one('a')
+                if link_elem:
+                    href = link_elem.get('href')
+                    title = link_elem.get_text(strip=True)
+                    print(f"[DEBUG] {platform_name}: 找到連結: {href}, 標題: {title}")
+                    
+                    if href and title and len(title) > 3:
+                        events.append({
+                            'element': item,
+                            'link': href, 
+                            'title': title,
+                            'selector': selector_name
+                        })
+                        
+            if events:
+                print(f"[DEBUG] {platform_name}: 成功使用 '{selector_name}' 提取了 {len(events)} 個活動")
+                break
+    
+    return events
+
 def fetch_opentix_events(sess):
     print("--- 開始從 OPENTIX 抓取活動 ---")
     url = "https://www.opentix.life"
+    
     try:
         html_content, error = safe_request(url, sess, platform_name="OPENTIX")
         if not html_content:
-            print(f"OPENTIX 獲取頁面失敗: {error}")
+            print(f"[DEBUG] OPENTIX 獲取頁面失敗: {error}")
             return []
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
-        event_links = soup.select('a[href*="/event/"]')
-        print(f"OPENTIX: 找到 {len(event_links)} 個活動連結")
         
-        events, seen_urls = [], set()
-        for link in event_links:
-            href = link.get('href')
-            if not href or href in seen_urls or not href.startswith('/event/'):
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 多種selector策略
+        selectors = {
+            'event_links': 'a[href*="/event/"]',
+            'alternative_1': 'div.event a',
+            'alternative_2': '.event-item a',
+            'alternative_3': 'div[class*="event"] a',
+            'generic': 'a[href*="event"]'
+        }
+        
+        raw_events = extract_events_with_debug(soup, selectors, "OPENTIX")
+        
+        events = []
+        for raw_event in raw_events:
+            href = raw_event['link']
+            if not href.startswith('/event/'):
                 continue
-            title_text = link.text.strip()
-            h_title = link.find('h5') or link.find('h6')
-            if h_title:
-                title_text = h_title.text.strip()
-            if len(title_text) <= 3:
-                continue
+                
             full_url = urljoin(url, href)
-            img_tag = link.find('img')
-            image = urljoin(url, img_tag['src']) if img_tag and img_tag.get('src') else ''
+            title = raw_event['title']
+            
+            # 嘗試找圖片
+            img_elem = raw_event['element'].find('img')
+            image = urljoin(url, img_elem['src']) if img_elem and img_elem.get('src') else ''
+            
             events.append({
-                'title': title_text,
+                'title': title,
                 'url': full_url,
                 'start_time': '詳見內文',
                 'platform': 'OPENTIX',
                 'image': image
             })
-            seen_urls.add(href)
-        print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
+            
+            print(f"[DEBUG] OPENTIX: 添加活動: {title}")
+        
+        print(f"[DEBUG] OPENTIX: 成功解析出 {len(events)} 筆活動")
         return events
+        
     except Exception as e:
-        print(f"OPENTIX 爬取異常: {e}")
+        print(f"[DEBUG] OPENTIX 爬取異常: {e}")
         print(traceback.format_exc())
         return []
 
@@ -250,48 +294,38 @@ def fetch_kham_events(sess):
     result = []
     category_map = {
         "音樂會/演唱會": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=205",
-        "展覽/博覽": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=231",
-        "戲劇表演": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=116",
-        "親子活動": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=129",
     }
     base_url = "https://kham.com.tw/"
     
-    for category_name, category_url in category_map.items():
+    # 只測試一個分類避免過多輸出
+    for category_name, category_url in list(category_map.items())[:1]:
         try:
             html_content, error = safe_request(category_url, sess, platform_name=f"寬宏-{category_name}")
             if not html_content:
-                print(f"寬宏-{category_name} 獲取頁面失敗: {error}")
+                print(f"[DEBUG] 寬宏-{category_name} 獲取頁面失敗: {error}")
                 continue
-                
+            
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # 調試頁面內容
-            debug_page_content(html_content, f"寬宏-{category_name}", 'ul#product_list li')
+            selectors = {
+                'product_list': 'ul#product_list li',
+                'alternative_1': '.product-item',
+                'alternative_2': 'div.product',
+                'alternative_3': 'li[class*="product"]',
+                'generic': 'li a'
+            }
             
-            items = soup.select('ul#product_list li')
-            if not items:
-                # 嘗試其他可能的選擇器
-                alternative_selectors = [
-                    'li.product-item', 'div.product', '.event-item', 
-                    'div.activity', 'li', 'div.item'
-                ]
-                for alt_sel in alternative_selectors:
-                    items = soup.select(alt_sel)
-                    if items:
-                        print(f"寬宏-{category_name}: 使用替代選擇器 '{alt_sel}' 找到 {len(items)} 個項目")
-                        break
+            raw_events = extract_events_with_debug(soup, selectors, f"寬宏-{category_name}")
             
-            for item in items:
-                t_link = item.select_one('div.product_name a') or item.select_one('a')
-                if not t_link:
-                    continue
-                title = t_link.text.strip()
-                link = t_link.get('href')
-                if not link or not title or len(title) <= 3:
-                    continue
+            for raw_event in raw_events:
+                title = raw_event['title']
+                link = raw_event['link']
                 full_url = urljoin(base_url, link)
-                img_elem = item.select_one('div.product_img img.lazy') or item.select_one('img')
+                
+                # 查找圖片
+                img_elem = raw_event['element'].select_one('img')
                 image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
+                
                 result.append({
                     'title': title,
                     'url': full_url,
@@ -299,50 +333,49 @@ def fetch_kham_events(sess):
                     'platform': '寬宏',
                     'image': image
                 })
-            print(f"{category_name} 類別解析出 {len(items)} 活動。")
+                
+                print(f"[DEBUG] 寬宏-{category_name}: 添加活動: {title}")
+            
         except Exception as e:
-            print(f"寬宏-{category_name}抓取異常: {e}")
+            print(f"[DEBUG] 寬宏-{category_name}抓取異常: {e}")
             print(traceback.format_exc())
+            
         time.sleep(random.uniform(2, 4))
     
-    print(f"成功解析出 {len(result)} 筆 寬宏 活動。")
+    print(f"[DEBUG] 寬宏: 總共解析出 {len(result)} 筆活動")
     return result
 
+# 簡化其他平台函數，重點在debug
 def fetch_kktix_events(sess):
     print("--- 開始從 KKTIX 抓取活動 ---")
     url = "https://kktix.com/events"
+    
     try:
-        # KKTIX有嚴格的反爬蟲，優先使用cloudscraper
-        html_content, error = safe_request(url, sess, use_cloudscraper=True, platform_name="KKTIX")
+        html_content, error = safe_request(url, sess, platform_name="KKTIX")
         if not html_content:
-            print(f"KKTIX 獲取頁面失敗: {error}")
+            print(f"[DEBUG] KKTIX 獲取頁面失敗: {error}")
             return []
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
-        debug_page_content(html_content, "KKTIX", 'ul.event-list li')
         
-        event_items = soup.select('ul.event-list li')
-        if not event_items:
-            # 嘗試其他選擇器
-            event_items = soup.select('div.event') or soup.select('li') or soup.select('div.activity')
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        selectors = {
+            'event_list': 'ul.event-list li',
+            'alternative_1': 'div.event',
+            'alternative_2': '.event-item',
+            'generic': 'li a, div a'
+        }
+        
+        raw_events = extract_events_with_debug(soup, selectors, "KKTIX")
+        
+        events = []
+        for raw_event in raw_events[:10]:  # 限制處理數量
+            title = raw_event['title']
+            link = raw_event['link']
+            full_url = urljoin("https://kktix.com/", link)
             
-        events, seen_urls = [], set()
-        for item in event_items:
-            link = item.select_one('a.event-link') or item.select_one('a')
-            if not link:
-                continue
-            href = link.get('href')
-            if not href:
-                continue
-            full_url = urljoin("https://kktix.com/", href)
-            if full_url in seen_urls:
-                continue
-            title_elem = item.select_one('.event-title') or link
-            title = safe_get_text(title_elem, link.text if link else '')
-            img_elem = item.select_one('img.event-image') or item.select_one('img')
+            img_elem = raw_event['element'].select_one('img')
             image = img_elem.get('data-src') or img_elem.get('src', '') if img_elem else ''
-            if not title or len(title) <= 3:
-                continue
+            
             events.append({
                 'title': title,
                 'url': full_url,
@@ -350,233 +383,51 @@ def fetch_kktix_events(sess):
                 'platform': 'KKTIX',
                 'image': image
             })
-            seen_urls.add(full_url)
-        print(f"成功解析出 {len(events)} 筆 KKTIX 活動。")
+            
+            print(f"[DEBUG] KKTIX: 添加活動: {title}")
+        
+        print(f"[DEBUG] KKTIX: 成功解析出 {len(events)} 筆活動")
         return events
+        
     except Exception as e:
-        print(f"KKTIX 爬取異常: {e}")
+        print(f"[DEBUG] KKTIX 爬取異常: {e}")
         print(traceback.format_exc())
         return []
-
-def fetch_tixcraft_events(sess):
-    print("--- 開始從 拓元 抓取活動 ---")
-    url = "https://tixcraft.com/activity"
-    try:
-        # 拓元也有反爬蟲，使用cloudscraper
-        html_content, error = safe_request(url, sess, use_cloudscraper=True, platform_name="拓元")
-        if not html_content:
-            print(f"拓元 獲取頁面失敗: {error}")
-            return []
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
-        debug_page_content(html_content, "拓元", 'div.activity-block')
-        
-        event_items = soup.select('div.activity-block')
-        if not event_items:
-            event_items = soup.select('div.event') or soup.select('li') or soup.select('div.activity')
-            
-        events = []
-        for item in event_items:
-            link = item.select_one('a[href*="/activity/detail"]') or item.select_one('a')
-            if not link:
-                continue
-            title_elem = item.select_one('.activity-name') or link
-            title = title_elem.text.strip() if title_elem else link.text.strip()
-            img_elem = item.select_one('.activity-thumbnail img') or item.select_one('img')
-            image = urljoin(url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
-            full_url = urljoin("https://tixcraft.com/", link['href'])
-            if not title or len(title) <= 3:
-                continue
-            events.append({
-                'title': title,
-                'url': full_url,
-                'start_time': '詳見內文',
-                'platform': '拓元',
-                'image': image
-            })
-        print(f"成功解析出 {len(events)} 筆 拓元 活動。")
-        return events
-    except Exception as e:
-        print(f"拓元 爬取異常: {e}")
-        print(traceback.format_exc())
-        return []
-
-# 其他平台函數類似修改...（UDN, iBon, 年代, Event GO）
-def fetch_udn_events(sess):
-    print("--- 開始從 UDN 抓取活動 ---")
-    result = []
-    category_map = {
-        "展覽/博覽": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=231",
-        "音樂會/演唱會": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=77",
-        "戲劇表演": "https://tickets.udnfunlife.com/application/UTK01/UTK0101_03.aspx?Category=116",
-    }
-    base_url = "https://tickets.udnfunlife.com/"
-    
-    for category_name, category_url in category_map.items():
-        try:
-            html_content, error = safe_request(category_url, sess, platform_name=f"UDN-{category_name}")
-            if not html_content:
-                print(f"UDN-{category_name} 獲取頁面失敗: {error}")
-                continue
-                
-            soup = BeautifulSoup(html_content, 'html.parser')
-            debug_page_content(html_content, f"UDN-{category_name}", 'ul#product_list li')
-            
-            items = soup.select('ul#product_list li')
-            if not items:
-                items = soup.select('li.product-item') or soup.select('div.product') or soup.select('li')
-            
-            for item in items:
-                t_link = item.select_one('div.product_name a') or item.select_one('a')
-                if not t_link:
-                    continue
-                title = t_link.text.strip()
-                link = t_link.get('href')
-                if not link or not title or len(title) <= 3:
-                    continue
-                full_url = urljoin(base_url, link)
-                img_elem = item.select_one('div.product_img img.lazy') or item.select_one('img')
-                image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
-                result.append({
-                    'title': title,
-                    'url': full_url,
-                    'start_time': '詳見內文',
-                    'platform': 'UDN',
-                    'image': image
-                })
-            print(f"{category_name} 類別解析出 {len(items)} 活動。")
-        except Exception as e:
-            print(f"UDN-{category_name}抓取異常: {e}")
-        time.sleep(random.uniform(1, 3))
-    
-    print(f"成功解析出 {len(result)} 筆 UDN 活動。")
-    return result
-
-def fetch_ibon_events(sess):
-    print("--- 開始從 iBon 抓取活動 ---")
-    url = "https://ticket.ibon.com.tw/Index/entertainment"
-    try:
-        html_content, error = safe_request(url, sess, platform_name="iBon")
-        if not html_content:
-            print(f"iBon 獲取頁面失敗: {error}")
-            return []
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
-        debug_page_content(html_content, "iBon", 'div.ticket-item')
-        
-        event_items = soup.select('div.ticket-item')
-        if not event_items:
-            event_items = soup.select('div.event') or soup.select('li') or soup.select('div.activity')
-        
-        events = []
-        for item in event_items:
-            link = item.select_one('a[href*="/activity/detail"]') or item.select_one('a')
-            if not link:
-                continue
-            title_elem = item.select_one('div.ticket-info div.ticket-title') or item.select_one('.title') or link
-            title = title_elem.text.strip() if title_elem else ''
-            img_elem = item.select_one('img')
-            image = urljoin(url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
-            if not title or len(title) <= 3:
-                continue
-            full_url = urljoin("https://ticket.ibon.com.tw/", link['href'])
-            events.append({
-                'title': title,
-                'url': full_url,
-                'start_time': '詳見內文',
-                'platform': 'iBon',
-                'image': image
-            })
-        print(f"成功解析出 {len(events)} 筆 iBon 活動。")
-        return events
-    except Exception as e:
-        print(f"iBon 爬取異常: {e}")
-        print(traceback.format_exc())
-        return []
-
-def fetch_ticket_events(sess):
-    print("--- 開始從 年代售票 抓取活動 ---")
-    result = []
-    category_map = {
-        "音樂會/演唱會": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=1",
-        "展覽/博覽": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=3",
-        "戲劇表演": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=2",
-        "親子活動": "https://www.ticket.com.tw/application/UTK01/UTK0101_.aspx?CATEGORY=4",
-    }
-    base_url = "https://www.ticket.com.tw/"
-    
-    for category_name, category_url in category_map.items():
-        try:
-            html_content, error = safe_request(category_url, sess, platform_name=f"年代-{category_name}")
-            if not html_content:
-                print(f"年代-{category_name} 獲取頁面失敗: {error}")
-                continue
-                
-            soup = BeautifulSoup(html_content, 'html.parser')
-            debug_page_content(html_content, f"年代-{category_name}", 'ul#product_list li')
-            
-            items = soup.select('ul#product_list li')
-            if not items:
-                items = soup.select('li.product-item') or soup.select('div.product') or soup.select('li')
-            
-            for item in items:
-                t_link = item.select_one('div.product_name a') or item.select_one('a')
-                if not t_link:
-                    continue
-                title = t_link.text.strip()
-                link = t_link.get('href')
-                if not link or not title or len(title) <= 3:
-                    continue
-                full_url = urljoin(base_url, link)
-                img_elem = item.select_one('div.product_img img.lazy') or item.select_one('img')
-                image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
-                result.append({
-                    'title': title,
-                    'url': full_url,
-                    'start_time': '詳見內文',
-                    'platform': '年代',
-                    'image': image
-                })
-            print(f"{category_name} 類別解析出 {len(items)} 活動。")
-        except Exception as e:
-            print(f"年代-{category_name}抓取異常: {e}")
-        time.sleep(random.uniform(1, 3))
-    
-    print(f"成功解析出 {len(result)} 筆 年代 活動。")
-    return result
 
 def fetch_eventgo_events(sess):
     print("--- 開始從 Event GO 抓取活動 ---")
     url = "https://eventgo.bnextmedia.com.tw/event/list"
     base_url = "https://eventgo.bnextmedia.com.tw/"
+    
     try:
         html_content, error = safe_request(url, sess, platform_name="Event GO")
         if not html_content:
-            print(f"Event GO 獲取頁面失敗: {error}")
+            print(f"[DEBUG] Event GO 獲取頁面失敗: {error}")
             return []
-            
-        soup = BeautifulSoup(html_content, 'html.parser')
-        debug_page_content(html_content, "Event GO", 'div.event-card, li.event-item')
         
-        event_items = soup.select('div.event-card, li.event-item')
-        if not event_items:
-            event_items = soup.select('div.event') or soup.select('li') or soup.select('div.activity')
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        selectors = {
+            'event_cards': 'div.event-card, li.event-item',
+            'alternative_1': 'div.event',
+            'alternative_2': '.event-list li',
+            'generic': 'a[href*="event"]'
+        }
+        
+        raw_events = extract_events_with_debug(soup, selectors, "Event GO")
         
         events = []
-        for item in event_items:
-            link = item.select_one('a[href*="event/detail"]') or item.select_one('a')
-            if not link:
+        for raw_event in raw_events:
+            href = raw_event['link']
+            if 'event/detail' not in href:
                 continue
-            href = link.get('href')
-            if not href:
-                continue
+                
+            title = raw_event['title']
             full_url = urljoin(base_url, href)
-            title_elem = item.select_one('h3.event-title, .event-title') or link
-            title = title_elem.text.strip() if title_elem else link.text.strip()
-            img_elem = item.select_one('img.event-img, img')
+            
+            img_elem = raw_event['element'].select_one('img')
             image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
-            if not title or len(title) <= 3:
-                continue
+            
             events.append({
                 'title': title,
                 'url': full_url,
@@ -584,10 +435,14 @@ def fetch_eventgo_events(sess):
                 'platform': 'Event GO',
                 'image': image
             })
-        print(f"成功解析出 {len(events)} 筆 Event GO 活動。")
+            
+            print(f"[DEBUG] Event GO: 添加活動: {title}")
+        
+        print(f"[DEBUG] Event GO: 成功解析出 {len(events)} 筆活動")
         return events
+        
     except Exception as e:
-        print(f"Event GO 爬取異常: {e}")
+        print(f"[DEBUG] Event GO 爬取異常: {e}")
         print(traceback.format_exc())
         return []
 
@@ -600,33 +455,34 @@ if __name__ == "__main__":
     engine = create_engine(db_url_for_sqlalchemy)
     setup_database(engine)
     
-    sess = create_session()
+    sess = create_robust_session()
     all_events = []
     
-    # 執行各平台爬取
-    fetchers = [
+    # 先測試幾個主要平台
+    test_platforms = [
         ('OPENTIX', fetch_opentix_events),
         ('寬宏', fetch_kham_events),
-        ('UDN', fetch_udn_events),
-        ('iBon', fetch_ibon_events),
         ('KKTIX', fetch_kktix_events),
-        ('拓元', fetch_tixcraft_events),
-        ('年代', fetch_ticket_events),
         ('Event GO', fetch_eventgo_events),
     ]
     
-    for platform_name, fetcher_func in fetchers:
+    for platform_name, fetcher_func in test_platforms:
         try:
-            print(f"\n開始處理平台: {platform_name}")
+            print(f"\n[DEBUG] ========== 開始處理平台: {platform_name} ==========")
             events = fetcher_func(sess)
             all_events.extend(events)
-            print(f"{platform_name} 完成，獲得 {len(events)} 筆活動")
+            print(f"[DEBUG] {platform_name} 完成，獲得 {len(events)} 筆活動")
+            
+            # 展示獲得的活動
+            for i, event in enumerate(events[:3]):  # 只顯示前3個
+                print(f"[DEBUG] {platform_name} 活動{i+1}: {event['title']} -> {event['url']}")
+                
         except Exception as e:
-            print(f"{platform_name} 處理異常: {e}")
+            print(f"[DEBUG] {platform_name} 處理異常: {e}")
             print(traceback.format_exc())
         
-        # 平台間休息
-        time.sleep(random.uniform(2, 5))
+        print(f"[DEBUG] ========== {platform_name} 處理完畢 ==========\n")
+        time.sleep(random.uniform(3, 6))  # 平台間較長休息
     
     # 去重處理
     final_events, processed_urls = [], set()
@@ -635,11 +491,16 @@ if __name__ == "__main__":
             final_events.append(event)
             processed_urls.add(event['url'])
     
-    print(f"\n總計抓取到 {len(final_events)} 筆不重複的活動。")
+    print(f"\n[DEBUG] 總計抓取到 {len(final_events)} 筆不重複的活動。")
+    
+    # 展示最終結果
+    for i, event in enumerate(final_events):
+        print(f"[DEBUG] 最終活動{i+1}: [{event['platform']}] {event['title']}")
     
     if final_events:
         save_data_to_db(engine, final_events)
+        print(f"[DEBUG] 已將 {len(final_events)} 筆活動寫入資料庫")
     else:
-        print("所有平台都沒有抓取到任何活動，不更新資料庫。")
+        print("[DEBUG] 沒有活動資料，跳過資料庫寫入")
     
     print(f"===== 票券爬蟲 {SCRAPER_VERSION} 執行完畢 =====")
