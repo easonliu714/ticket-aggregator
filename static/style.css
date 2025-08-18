@@ -32,10 +32,10 @@ body {
     flex-grow: 1;
 }
 
-/* --- 活動卡片美化 (全新) --- */
+/* --- 活動卡片美化 --- */
 .event-card {
     transition: box-shadow 0.3s ease, transform 0.3s ease;
-    overflow: hidden; /* 確保圓角效果 */
+    overflow: hidden;
 }
 
 .event-card:hover {
@@ -44,20 +44,19 @@ body {
 }
 
 .event-image {
-    background-size: cover;
+    background-size: contain; /* 顯示更多內容 */
     background-position: center;
-    min-height: 120px; /* 確保圖片有最小高度 */
+    min-height: 100px; /* 縮小尺寸 */
+    background-repeat: no-repeat;
 }
 
 .event-title {
-    /* 限制標題最多顯示兩行，超過部分用 ... 代替 */
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;  
     overflow: hidden;
     text-overflow: ellipsis;
 }
-
 
 /* --- 平台徽章顏色 --- */
 .platform-badge.kktix { background-color: #e50012; }
@@ -66,4 +65,5 @@ body {
 .platform-badge.ibon { background-color: #00b140; }
 .platform-badge.udn { background-color: #c51f24; }
 .platform-badge.opentix { background-color: #00a0e9; }
-.platform-badge.eventgo { background-color: #ff5722; }  /* 新增Event Go顏色，隨意選擇 */
+.platform-badge.年代 { background-color: #ff9800; }
+.platform-badge.eventgo { background-color: #ff5722; } /* Event GO 顏色 */
