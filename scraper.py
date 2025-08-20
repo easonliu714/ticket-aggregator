@@ -6,6 +6,7 @@ import time
 import traceback
 import re
 from datetime import datetime
+import json
 
 from sqlalchemy import create_engine, text
 from bs4 import BeautifulSoup
@@ -14,7 +15,7 @@ import cloudscraper
 from urllib.parse import urljoin
 
 # --- 設定區 ---
-SCRAPER_VERSION = "v9.2"
+SCRAPER_VERSION = "v9.3"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 USER_AGENTS = [
@@ -75,7 +76,6 @@ def extract_info_from_title(title):
 # --- Debug HTML內容 ---
 def debug_html_content(platform_name, url, html_content):
     if html_content:
-        # 移除<head>標籤內容
         content_after_head = re.split(r'</head>', html_content, flags=re.IGNORECASE)[-1]
         preview = content_after_head[:500].strip()
         print(f"[DEBUG] {platform_name} HTML預覽 ({url}):")
@@ -159,30 +159,115 @@ def save_data_to_db(engine, events):
 def safe_get_text(element, default="詳內文"):
     return element.get_text(strip=True) if element and hasattr(element, 'get_text') and element.get_text(strip=True) else default
 
-# --- 各平台爬蟲 ---
+# --- OPENTIX 修正版（參考 show_news_v12.py 邏輯）---
 def fetch_opentix_events(session):
     print("--- 開始從 OPENTIX 抓取活動 ---")
-    url = "https://www.opentix.life"
-    try:
-        resp = session.get(url, timeout=20, verify=False)
-        resp.raise_for_status()
-        debug_html_content("OPENTIX", url, resp.text)
-        
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        event_links = soup.select('a[href*="/event/"]')
-        events, seen = [], set()
-        for link in event_links:
-            href = link.get('href')
-            if not href or href in seen or not href.startswith('/event/'):
-                continue
-            title_text = link.text.strip()
-            h_title = link.find('h5') or link.find('h6')
-            if h_title:
-                title_text = h_title.text.strip()
-            if len(title_text) > 3:
-                full_url = urljoin(url, href)
-                img_tag = link.find('img')
-                image = urljoin(url, img_tag['src']) if img_tag and img_tag.get('src') else ''
+    
+    # 嘗試多個可能的 URL
+    urls = [
+        "https://www.opentix.life",
+        "https://www.opentix.life/events",
+        "https://www.opentix.life/event"
+    ]
+    
+    events, seen = [], set()
+    
+    for url in urls:
+        try:
+            # 增加更多 headers 模擬真實瀏覽器
+            headers = {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Cache-Control': 'max-age=0',
+            }
+            
+            resp = session.get(url, headers=headers, timeout=30, verify=False)
+            resp.raise_for_status()
+            
+            debug_html_content("OPENTIX", url, resp.text)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # 多種選擇器策略
+            selectors = [
+                'a[href*="/event/"]',
+                'a[href*="/events/"]',
+                '.event-card a',
+                '.activity-card a',
+                '[data-event-id]',
+                '.event-item',
+                '.activity-item',
+                '.card[href*="event"]'
+            ]
+            
+            found_links = []
+            for selector in selectors:
+                links = soup.select(selector)
+                if links:
+                    found_links.extend(links)
+                    print(f"使用選擇器 '{selector}' 找到 {len(links)} 個連結")
+            
+            # 如果沒有找到，嘗試更通用的方法
+            if not found_links:
+                # 查找所有包含 "event" 的連結
+                all_links = soup.find_all('a', href=True)
+                for link in all_links:
+                    href = link.get('href', '')
+                    if 'event' in href.lower():
+                        found_links.append(link)
+                print(f"通用搜索找到 {len(found_links)} 個可能的活動連結")
+            
+            # 處理找到的連結
+            for link in found_links:
+                href = link.get('href', '')
+                if not href or href in seen:
+                    continue
+                    
+                # 排除無關連結
+                if any(exclude in href.lower() for exclude in ['login', 'register', 'help', 'about', 'contact']):
+                    continue
+                
+                # 標題提取
+                title_text = ''
+                title_elements = [
+                    link.find('h1'), link.find('h2'), link.find('h3'),
+                    link.find('h4'), link.find('h5'), link.find('h6'),
+                    link.find(class_=re.compile(r'title|name|event')),
+                    link
+                ]
+                
+                for elem in title_elements:
+                    if elem and elem.get_text(strip=True):
+                        title_text = elem.get_text(strip=True)
+                        break
+                
+                if not title_text or len(title_text) <= 3:
+                    continue
+                
+                # URL 處理
+                if href.startswith('//'):
+                    full_url = 'https:' + href
+                elif href.startswith('/'):
+                    full_url = urljoin(url, href)
+                elif not href.startswith('http'):
+                    full_url = urljoin(url, href)
+                else:
+                    full_url = href
+                
+                # 圖片提取
+                img_elem = link.find('img')
+                image = ''
+                if img_elem:
+                    img_src = img_elem.get('src') or img_elem.get('data-src') or img_elem.get('data-lazy')
+                    if img_src:
+                        image = urljoin(url, img_src)
                 
                 # 提取詳細資訊
                 info = extract_info_from_title(title_text)
@@ -199,12 +284,19 @@ def fetch_opentix_events(session):
                     'event_date': info['date']
                 })
                 seen.add(href)
-        print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
-        return events
-    except Exception as e:
-        print(f"OPENTIX 爬取失敗: {e}")
-        return []
+            
+            # 如果在這個 URL 找到活動就停止
+            if events:
+                break
+                
+        except Exception as e:
+            print(f"OPENTIX URL {url} 爬取失敗: {e}")
+            continue
+    
+    print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
+    return events
 
+# --- 其他平台函式保持不變但加入詳細資訊 ---
 def fetch_kham_events(session):
     print("--- 開始從 寬宏 抓取活動 ---")
     base_url = "https://kham.com.tw/"
@@ -215,6 +307,7 @@ def fetch_kham_events(session):
         "親子活動": "https://kham.com.tw/application/UTK01/UTK0101_06.aspx?TYPE=1&CATEGORY=129",
     }
     all_events, seen_urls = [], set()
+    
     for category_name, category_url in category_map.items():
         print(f" 抓取分類：{category_name}")
         try:
@@ -232,6 +325,7 @@ def fetch_kham_events(session):
                 link = title_elem.get('href') if title_elem else None
                 if not link or not title or len(title) <= 3:
                     continue
+                    
                 full_url = urljoin(base_url, link)
                 if full_url in seen_urls:
                     continue
@@ -256,22 +350,21 @@ def fetch_kham_events(session):
             time.sleep(random.uniform(1, 2))
         except Exception as e:
             print(f"寬宏抓取 {category_name} 失敗: {e}")
+    
     print(f"成功解析出 {len(all_events)} 筆 寬宏 活動。")
     return all_events
 
 def fetch_kktix_events(session):
     print("--- 開始從 KKTIX 抓取活動 ---")
-    base_url = "https://kktix.com/"
-    url = "https://kktix.com/events"
     try:
-        # 使用cloudscraper處理SSL問題
+        # 使用 cloudscraper 處理反爬蟲
         cs_session = cloudscraper.create_scraper()
+        url = "https://kktix.com/events"
         resp = cs_session.get(url, timeout=20)
         resp.raise_for_status()
         debug_html_content("KKTIX", url, resp.text)
         
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # 嘗試多種selector
         event_items = soup.select('ul.event-list li') or soup.select('div[class*="event"]') or soup.select('article')
         events, seen = [], set()
         
@@ -280,7 +373,7 @@ def fetch_kktix_events(session):
             if not link:
                 continue
             href = link.get('href')
-            full_url = urljoin(base_url, href) if href else None
+            full_url = urljoin("https://kktix.com/", href) if href else None
             if not full_url or full_url in seen:
                 continue
                 
@@ -305,6 +398,7 @@ def fetch_kktix_events(session):
                     'event_date': info['date']
                 })
                 seen.add(full_url)
+        
         print(f"成功解析出 {len(events)} 筆 KKTIX 活動。")
         return events
     except Exception as e:
@@ -313,7 +407,6 @@ def fetch_kktix_events(session):
 
 def fetch_tixcraft_events(session):
     print("--- 開始從 拓元 抓取活動 ---")
-    url = "https://tixcraft.com/activity"
     try:
         # 使用cloudscraper對付反爬蟲
         cs_session = cloudscraper.create_scraper()
@@ -322,12 +415,13 @@ def fetch_tixcraft_events(session):
             'Referer': 'https://tixcraft.com/',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         })
+        
+        url = "https://tixcraft.com/activity"
         resp = cs_session.get(url, timeout=20)
         resp.raise_for_status()
         debug_html_content("拓元", url, resp.text)
         
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # 嘗試多種selector
         event_items = soup.select('div.activity-block') or soup.select('div[class*="activity"]') or soup.select('article')
         events, seen = [], set()
         
@@ -358,6 +452,7 @@ def fetch_tixcraft_events(session):
                     'event_date': info['date']
                 })
                 seen.add(full_url)
+                
         print(f"成功解析出 {len(events)} 筆 拓元 活動。")
         return events
     except Exception as e:
@@ -373,7 +468,7 @@ def fetch_ibon_events(session):
         debug_html_content("iBon", url, resp.text)
         
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # 嘗試多種selector
+        # iBon 使用 Angular，內容可能通過 JS 加載
         event_items = soup.select('div.ticket-item') or soup.select('div[class*="item"]') or soup.select('article')
         events, seen = [], set()
         
@@ -407,23 +502,24 @@ def fetch_ibon_events(session):
                     'event_date': info['date']
                 })
                 seen.add(full_url)
+                
         print(f"成功解析出 {len(events)} 筆 iBon 活動。")
         return events
     except Exception as e:
         print(f"iBon 爬取失敗: {e}")
         return []
 
-# 其他平台函式類似模式，加入debug_html_content和詳細資訊提取...
+# 其他平台函式（UDN、年代、Event GO）類似實作...
 def fetch_udn_events(session):
-    # [類似實作，加入debug和詳細資訊]
+    # 實作邏輯類似寬宏
     return []
 
 def fetch_ticket_events(session):
-    # [類似實作，加入debug和詳細資訊]
+    # 實作邏輯類似寬宏
     return []
 
 def fetch_eventgo_events(session):
-    # [類似實作，加入debug和詳細資訊]
+    # 實作邏輯類似其他平台
     return []
 
 # --- 主程式 ---
@@ -431,6 +527,7 @@ if __name__ == "__main__":
     print(f"===== 開始執行票券爬蟲 {SCRAPER_VERSION} =====")
     if not DATABASE_URL:
         raise Exception("環境變數 DATABASE_URL 未設定")
+    
     db_url_for_sqlalchemy = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
     engine = create_engine(db_url_for_sqlalchemy)
     setup_database(engine)
