@@ -15,7 +15,7 @@ import cloudscraper
 from urllib.parse import urljoin
 
 # --- 設定區 ---
-SCRAPER_VERSION = "v9.3"
+SCRAPER_VERSION = "v9.4"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 USER_AGENTS = [
