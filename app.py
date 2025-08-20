@@ -16,7 +16,7 @@ engine = create_engine(db_url_for_sqlalchemy)
 
 def get_platform_status():
     """計算每個平台的活動總數"""
-    platform_names = ["KKTIX", "拓元", "寬宏", "iBon", "UDN", "OPENTIX", "年代", "Event GO"]  # 添加 Event GO
+    platform_names = ["KKTIX", "拓元", "寬宏", "iBon", "UDN", "OPENTIX", "年代", "Event GO"]
     status = {name: 0 for name in platform_names}
     try:
         with engine.connect() as conn:
@@ -41,16 +41,19 @@ def query_events(limit=50, search='', platform='', event_type='', sort='id DESC'
     """通用查詢事件，支持搜尋/篩選"""
     base_sql = "SELECT * FROM events WHERE 1=1"
     params = {}
+    
     if search:
         base_sql += " AND title ILIKE :search"
         params['search'] = f"%{search}%"
     if platform:
         base_sql += " AND platform = :platform"
         params['platform'] = platform
-    if event_type:  # 假設type從title推斷，或未來加DB字段
-        base_sql += " AND title ILIKE :type"
+    if event_type:
+        base_sql += " AND event_type ILIKE :type"
         params['type'] = f"%{event_type}%"
+    
     base_sql += f" ORDER BY {sort} LIMIT {limit};"
+    
     try:
         with engine.connect() as conn:
             result = conn.execute(text(base_sql), params)
@@ -65,14 +68,14 @@ def home():
     event_type = request.args.get('type', '')
     plat = request.args.get('platform', '')
     sort = request.args.get('sort', 'id DESC')
-    events = query_events(50, search, plat, event_type, sort)
     
+    events = query_events(50, search, plat, event_type, sort)
     platform_status = get_platform_status()
     current_time = get_current_taipei_time()
-
+    
     return render_template(
-        'index.html', 
-        events=events, 
+        'index.html',
+        events=events,
         platform_status=platform_status,
         current_date=current_time["date"],
         last_update=current_time["time"],
@@ -84,14 +87,14 @@ def platform_page(platform_name):
     search = request.args.get('search', '')
     event_type = request.args.get('type', '')
     sort = request.args.get('sort', 'id DESC')
-    events = query_events(search=search, platform=platform_name, event_type=event_type, sort=sort)
     
+    events = query_events(search=search, platform=platform_name, event_type=event_type, sort=sort)
     platform_status = get_platform_status()
     current_time = get_current_taipei_time()
-
+    
     return render_template(
-        'index.html', 
-        events=events, 
+        'index.html',
+        events=events,
         platform_status=platform_status,
         current_date=current_time["date"],
         last_update=current_time["time"],
