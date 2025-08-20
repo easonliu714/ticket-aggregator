@@ -15,13 +15,22 @@ import cloudscraper
 from urllib.parse import urljoin
 
 # --- 設定區 ---
-SCRAPER_VERSION = "v9.4"
+SCRAPER_VERSION = "v9.5"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0',
+]
+
+EVENT_TYPE_LIST = [
+    "音樂會/演唱會",
+    "戲劇表演",
+    "展覽/博覽",
+    "親子活動",
+    "舞蹈表演",
+    "其他",
 ]
 
 def extract_info_from_title(title):
@@ -130,14 +139,11 @@ def save_data_to_db(engine, events):
 def safe_get_text(element, default="詳內文"):
     return element.get_text(strip=True) if element and hasattr(element, 'get_text') and element.get_text(strip=True) else default
 
-# --- OPENTIX 最終修正版 ---
+
+# --- OPENTIX (綜合修正保留完整卡片抓取圖片與類型+兼顧數量) ---
 def fetch_opentix_events(session):
     print("--- 開始從 OPENTIX 抓取活動 ---")
-    urls = [
-        "https://www.opentix.life",
-        "https://www.opentix.life/events",
-        "https://www.opentix.life/event"
-    ]
+    urls = ["https://www.opentix.life", "https://www.opentix.life/event"]
     events, seen = [], set()
     for url in urls:
         try:
@@ -158,7 +164,8 @@ def fetch_opentix_events(session):
             resp.raise_for_status()
             debug_html_content("OPENTIX", url, resp.text)
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # 找所有活動卡片
+            
+            # 主抓活動卡片 (確保圖與類別)
             card_links = soup.find_all('a', class_='oa-card-img-title')
             print(f"發現活動卡片(oa-card-img-title)：{len(card_links)}")
             for card in card_links:
@@ -186,16 +193,46 @@ def fetch_opentix_events(session):
                     'event_date': info['date']
                 })
                 seen.add(href)
-            # 若有活動，直接結束
-            if events:
-                break
+            
+            # 輔助擴增用連結，避免遺漏主卡片沒包含的活動 (不覆蓋圖片、類型)
+            extra_links = soup.select('a[href*="/event/"]')
+            for link_a in extra_links:
+                href = link_a.get('href', '')
+                if not href or href in seen:
+                    continue
+                full_url = urljoin(url, href)
+                # 只抓標題嘗試補充(圖片與類型不補)
+                title_text = None
+                # 直接用aria-label或文字嘗試
+                aria_label = link_a.get('aria-label', '').strip()
+                if aria_label and len(aria_label) > 3:
+                    title_text = aria_label
+                elif link_a.text.strip():
+                    title_text = link_a.text.strip()
+                if not title_text or len(title_text) <= 3:
+                    continue
+                info = extract_info_from_title(title_text)
+                events.append({
+                    'title': title_text,
+                    'url': full_url,
+                    'start_time': '詳見內文',
+                    'platform': 'OPENTIX',
+                    'image': '',
+                    'event_type': '其他',
+                    'location': info['location'],
+                    'event_date': info['date']
+                })
+                seen.add(href)
+
+            break  # 成功抓取後跳出
         except Exception as e:
             print(f"OPENTIX URL {url} 爬取失敗: {e}")
             continue
     print(f"成功解析出 {len(events)} 筆 OPENTIX 活動。")
     return events
 
-# --- 其他平台（保持原有邏輯）---
+
+# --- 其他常見平台 ---
 def fetch_kham_events(session):
     print("--- 開始從 寬宏 抓取活動 ---")
     base_url = "https://kham.com.tw/"
@@ -299,10 +336,10 @@ def fetch_tixcraft_events(session):
         resp.raise_for_status()
         debug_html_content("拓元", url, resp.text)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        event_items = soup.select('div.activity-block') or soup.select('div[class*=\"activity\"]') or soup.select('article')
+        event_items = soup.select('div.activity-block') or soup.select('div[class*="activity"]') or soup.select('article')
         events, seen = [], set()
         for item in event_items:
-            link = item.select_one('a[href*=\"/activity/detail\"]') or item.select_one('a')
+            link = item.select_one('a[href*="/activity/detail"]') or item.select_one('a')
             if not link:
                 continue
             title_elem = item.select_one('.activity-name') or item.select_one('h3') or item.select_one('h2') or link
@@ -337,10 +374,10 @@ def fetch_ibon_events(session):
         resp.raise_for_status()
         debug_html_content("iBon", url, resp.text)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        event_items = soup.select('div.ticket-item') or soup.select('div[class*=\"item\"]') or soup.select('article')
+        event_items = soup.select('div.ticket-item') or soup.select('div[class*="item"]') or soup.select('article')
         events, seen = [], set()
         for item in event_items:
-            link = item.select_one('a[href*=\"/activity/detail\"]') or item.select_one('a')
+            link = item.select_one('a[href*="/activity/detail"]') or item.select_one('a')
             if not link:
                 continue
             title_elem = item.select_one('div.ticket-title') or item.select_one('h3') or item.select_one('.title') or link
@@ -370,12 +407,144 @@ def fetch_ibon_events(session):
         return []
 
 def fetch_udn_events(session):
-    return []
-def fetch_ticket_events(session):
-    return []
-def fetch_eventgo_events(session):
-    return []
+    print("--- 開始從 UDN 抓取活動 ---")
+    try:
+        base_url = "https://tickets.udnfunlife.com"
+        category_map = {
+            "展覽/博覽": base_url + "/application/UTK01/UTK0101_03.aspx?Category=231",
+            "音樂會/演唱會": base_url + "/application/UTK01/UTK0101_03.aspx?Category=77",
+            "戲劇表演": base_url + "/application/UTK01/UTK0101_03.aspx?Category=116",
+            "親子活動": base_url + "/application/UTK01/UTK0101_03.aspx?Category=129",
+        }
+        all_events, seen_urls = [], set()
+        for category_name, category_url in category_map.items():
+            print(f" 抓取分類：{category_name}")
+            resp = session.get(category_url, timeout=20)
+            resp.raise_for_status()
+            debug_html_content("UDN", category_url, resp.text)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            items = soup.select('ul#event_listing li') or soup.select('li.ticket-item') or soup.select('div.ticket-item')
+            for item in items:
+                title_elem = item.select_one('a') or item.select_one('h3')
+                title = title_elem.text.strip() if title_elem else ''
+                link = title_elem.get('href') if title_elem else None
+                if not link or not title or len(title) <= 3:
+                    continue
+                full_url = urljoin(base_url, link)
+                if full_url in seen_urls:
+                    continue
+                img_elem = item.select_one('img')
+                image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
+                info = extract_info_from_title(title)
+                all_events.append({
+                    'title': title,
+                    'url': full_url,
+                    'start_time': '詳見內文',
+                    'platform': 'UDN',
+                    'image': image,
+                    'event_type': category_name,
+                    'location': info['location'],
+                    'event_date': info['date']
+                })
+                seen_urls.add(full_url)
+            time.sleep(random.uniform(1, 2))
+        print(f"成功解析出 {len(all_events)} 筆 UDN 活動。")
+        return all_events
+    except Exception as e:
+        print(f"UDN 爬取失敗: {e}")
+        return []
 
+def fetch_ticket_events(session):
+    print("--- 開始從 年代售票 抓取活動 ---")
+    try:
+        base_url = "https://www.ticket.com.tw"
+        category_map = {
+            "音樂會/演唱會": base_url + "/application/UTK01/UTK0101_.aspx?CATEGORY=1",
+            "展覽/博覽": base_url + "/application/UTK01/UTK0101_.aspx?CATEGORY=3",
+            "戲劇表演": base_url + "/application/UTK01/UTK0101_.aspx?CATEGORY=2",
+            "親子活動": base_url + "/application/UTK01/UTK0101_.aspx?CATEGORY=4",
+        }
+        all_events, seen_urls = [], set()
+        for category_name, category_url in category_map.items():
+            print(f" 抓取分類：{category_name}")
+            resp = session.get(category_url, timeout=20)
+            resp.raise_for_status()
+            debug_html_content("年代售票", category_url, resp.text)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            items = soup.select('div.product') or soup.select('li.product-item') or soup.select('div[class*="product"]')
+            for item in items:
+                title_elem = item.select_one('div.product_name a') or item.select_one('a')
+                title = title_elem.text.strip() if title_elem else ''
+                link = title_elem.get('href') if title_elem else None
+                if not link or not title or len(title) <= 3:
+                    continue
+                full_url = urljoin(base_url, link)
+                if full_url in seen_urls:
+                    continue
+                img_elem = item.select_one('img')
+                image = urljoin(base_url, img_elem.get('data-src') or img_elem.get('src', '')) if img_elem else ''
+                info = extract_info_from_title(title)
+                all_events.append({
+                    'title': title,
+                    'url': full_url,
+                    'start_time': '詳見內文',
+                    'platform': '年代',
+                    'image': image,
+                    'event_type': category_name,
+                    'location': info['location'],
+                    'event_date': info['date']
+                })
+                seen_urls.add(full_url)
+            time.sleep(random.uniform(1, 2))
+        print(f"成功解析出 {len(all_events)} 筆 年代售票 活動。")
+        return all_events
+    except Exception as e:
+        print(f"年代售票 爬取失敗: {e}")
+        return []
+
+def fetch_eventgo_events(session):
+    print("--- 開始從 Event GO 抓取活動 ---")
+    try:
+        url = "https://eventgo.bnextmedia.com.tw/event/list"
+        resp = session.get(url, timeout=20)
+        resp.raise_for_status()
+        debug_html_content("Event GO", url, resp.text)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        events = []
+        seen = set()
+        cards = soup.select('div.event-card') or soup.select('li.event-item') or soup.select('a')
+        for card in cards:
+            link = card.select_one('a') or card
+            href = link.get('href') if link else None
+            if not href or href in seen:
+                continue
+            full_url = urljoin(url, href)
+            title = card.select_one('h3, .title') or link
+            title_text = title.text.strip() if title else ''
+            if not title_text or len(title_text) <= 3:
+                continue
+            img_elem = card.select_one('img')
+            img_url = img_elem.get('src') if img_elem else ''
+            info = extract_info_from_title(title_text)
+            events.append({
+                'title': title_text,
+                'url': full_url,
+                'start_time': '詳見內文',
+                'platform': 'Event GO',
+                'image': img_url,
+                'event_type': '其他',
+                'location': info['location'],
+                'event_date': info['date']
+            })
+            seen.add(href)
+        print(f"成功解析出 {len(events)} 筆 Event GO 活動。")
+        return events
+    except Exception as e:
+        print(f"Event GO 爬取失敗: {e}")
+        return []
+
+
+# --- 主程式 ---
 if __name__ == "__main__":
     print(f"===== 開始執行票券爬蟲 {SCRAPER_VERSION} =====")
     if not DATABASE_URL:
