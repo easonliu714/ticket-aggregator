@@ -1,13 +1,18 @@
 # app.py
+
 import os
 from flask import Flask, render_template, request
 from sqlalchemy import create_engine, text
 from datetime import datetime
 import pytz
 
+# 添加這行導入
+from scraper import get_all_event_types_from_db
+
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
+
 if not DATABASE_URL:
     raise Exception("環境變數 DATABASE_URL 未設定")
 
@@ -41,19 +46,21 @@ def query_events(limit=50, search='', platform='', event_type='', sort='id DESC'
     """通用查詢事件，支持搜尋/篩選"""
     base_sql = "SELECT * FROM events WHERE 1=1"
     params = {}
-    
+
     if search:
         base_sql += " AND title ILIKE :search"
         params['search'] = f"%{search}%"
+
     if platform:
         base_sql += " AND platform = :platform"
         params['platform'] = platform
-    if event_type:
+
+    if event_type and event_type != '所有類型':  # 添加條件檢查
         base_sql += " AND event_type ILIKE :type"
         params['type'] = f"%{event_type}%"
-    
+
     base_sql += f" ORDER BY {sort} LIMIT {limit};"
-    
+
     try:
         with engine.connect() as conn:
             result = conn.execute(text(base_sql), params)
@@ -68,15 +75,19 @@ def home():
     event_type = request.args.get('type', '')
     plat = request.args.get('platform', '')
     sort = request.args.get('sort', 'id DESC')
-    
+
     events = query_events(50, search, plat, event_type, sort)
     platform_status = get_platform_status()
     current_time = get_current_taipei_time()
     
+    # 添加這行獲取動態活動類型清單
+    all_types = get_all_event_types_from_db(engine)
+
     return render_template(
         'index.html',
         events=events,
         platform_status=platform_status,
+        all_types=all_types,  # 新增這個參數
         current_date=current_time["date"],
         last_update=current_time["time"],
         page_title="所有最新活動"
@@ -87,15 +98,19 @@ def platform_page(platform_name):
     search = request.args.get('search', '')
     event_type = request.args.get('type', '')
     sort = request.args.get('sort', 'id DESC')
-    
+
     events = query_events(search=search, platform=platform_name, event_type=event_type, sort=sort)
     platform_status = get_platform_status()
     current_time = get_current_taipei_time()
     
+    # 添加這行獲取動態活動類型清單
+    all_types = get_all_event_types_from_db(engine)
+
     return render_template(
         'index.html',
         events=events,
         platform_status=platform_status,
+        all_types=all_types,  # 新增這個參數
         current_date=current_time["date"],
         last_update=current_time["time"],
         page_title=f"{platform_name} 所有活動"
